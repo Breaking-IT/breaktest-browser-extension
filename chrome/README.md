@@ -28,10 +28,10 @@ Chrome Web Store or Microsoft Edge Add-ons.
 ## Requirements
 
 - Google Chrome or Chromium-based Microsoft Edge version 118 or newer.
-- A local BreakTest source checkout containing `browser-extension/chrome`.
+- A local checkout of this repository containing the `chrome` directory.
 - Developer mode enabled in the browser.
 
-Firefox uses a separate native implementation in `browser-extension/firefox`.
+Firefox uses a separate native implementation in `firefox`.
 See that directory's README for installation and browser-specific behavior.
 
 ## Install the local extension
@@ -41,8 +41,8 @@ See that directory's README for installation and browser-specific behavior.
 1. Open `chrome://extensions`.
 2. Enable **Developer mode**.
 3. Choose **Load unpacked**.
-4. Select `<breaktest checkout>/browser-extension/chrome`. Select the `chrome`
-   directory itself, not its parent.
+4. Select `<extension checkout>/chrome`. Select the `chrome` directory itself,
+   not its parent.
 5. Open **Details** for BreakTest Browser Recorder and enable **Allow in
    incognito**.
 6. Open Chrome's Extensions menu and pin **BreakTest Browser Recorder**.
@@ -52,7 +52,7 @@ See that directory's README for installation and browser-specific behavior.
 1. Open `edge://extensions`.
 2. Enable **Developer mode**.
 3. Choose **Load unpacked**.
-4. Select the same `<breaktest checkout>/browser-extension/chrome` directory.
+4. Select the same `<extension checkout>/chrome` directory.
 5. Open **Details** for BreakTest Browser Recorder and enable **Allow in
    InPrivate**.
 6. Pin **BreakTest Browser Recorder** to the toolbar.
@@ -138,7 +138,7 @@ cache option before starting.
 
 ## Update the local extension
 
-After pulling new BreakTest changes:
+After pulling new recorder changes:
 
 1. Finish any active recording first. Reloading discards an active recording.
 2. Open `chrome://extensions` or `edge://extensions`.

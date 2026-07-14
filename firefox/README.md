@@ -25,13 +25,13 @@ instead of the Chromium DevTools protocol.
 ## Requirements
 
 - Firefox 128 or newer.
-- A local BreakTest checkout containing `browser-extension/firefox`.
+- A local checkout of this repository containing the `firefox` directory.
 
 ## Install temporarily
 
 1. Open `about:debugging#/runtime/this-firefox` in Firefox.
 2. Choose **Load Temporary Add-on...**.
-3. Select `browser-extension/firefox/manifest.json` from the BreakTest checkout.
+3. Select `firefox/manifest.json` from the extension checkout.
 4. Open `about:addons`, select **BreakTest Browser Recorder**, and set **Run in
    Private Windows** to **Allow**.
 5. Pin **BreakTest Browser Recorder** from Firefox's Extensions menu if desired.
