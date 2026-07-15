@@ -36,6 +36,19 @@ reloaded from `about:debugging#/runtime/this-firefox`.
 The BreakTest repository pins this repository as its `browser-extension`
 submodule so released BreakTest archives continue to include the recorder.
 
+Validate both implementations and create the exact ZIP files accepted by the
+browser stores:
+
+```shell
+python3 scripts/validate_extensions.py
+python3 scripts/package_extensions.py
+```
+
+Packages and SHA-256 checksums are written to `dist/`. The Chromium package is
+used for both Chrome and Microsoft Edge. Store listing copy, permission
+justifications, and reviewer instructions are maintained under
+`store-listing/`.
+
 ## Security and privacy
 
 HAR recordings can contain credentials, cookies, authorization tokens,
@@ -43,7 +56,9 @@ personal data, and response content. Record only systems you are authorized to
 test and review recordings before sharing them.
 
 The recorder processes and exports data locally. It does not upload recordings
-to a BreakTest service.
+to a BreakTest service. The recording-data consent is remembered locally and
+can be reviewed or revoked from **Privacy & settings** in the recorder. See the
+full [privacy policy](PRIVACY.md).
 
 Please report suspected vulnerabilities privately according to
 [SECURITY.md](SECURITY.md).

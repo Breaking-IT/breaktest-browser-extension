@@ -18,12 +18,18 @@
 const transactionName = document.querySelector("#transaction-name");
 const startUrl = document.querySelector("#start-url");
 const disableCache = document.querySelector("#disable-cache");
+const recordingConsent = document.querySelector("#recording-consent");
+const recordingDisclosure = document.querySelector("#recording-disclosure");
+const privacySummary = document.querySelector("#privacy-summary");
+const privacySettingsButton = document.querySelector("#privacy-settings-button");
+const privacyDoneButton = document.querySelector("#privacy-done-button");
 const startSetup = document.querySelector("#start-setup");
 const startActions = document.querySelector("#start-actions");
 const startButton = document.querySelector("#start-button");
 const blankStartButton = document.querySelector("#blank-start-button");
 const incognitoStartButton = document.querySelector("#incognito-start-button");
 const stopButton = document.querySelector("#stop-button");
+const discardButton = document.querySelector("#discard-button");
 const transactionHint = document.querySelector("#transaction-hint");
 const clearViewButton = document.querySelector("#clear-view-button");
 const statusText = document.querySelector("#status-text");
@@ -37,6 +43,7 @@ const requestList = document.querySelector("#request-list");
 let active = false;
 let busy = false;
 let errors = 0;
+let pendingHar = null;
 let lastCommittedTransactionName = transactionName.value.trim();
 let transactionNameDirty = false;
 let lastTransactionInputAt = 0;
@@ -45,12 +52,20 @@ let transactionCommitPromise = Promise.resolve();
 const TRANSACTION_TYPING_SETTLE_MS = 250;
 const INCOGNITO_LAUNCH_KEY = "pendingIncognitoLaunch";
 const INCOGNITO_LAUNCH_TTL_MS = 60_000;
+const RECORDING_CONSENT_KEY = "recordingDisclosureAcceptedVersion";
+const RECORDING_DISCLOSURE_VERSION = 1;
+const DEFAULT_TRANSACTION_NAME = "01_OpenHomepage";
+let recordingConsentAccepted = false;
 const inIncognitoContext = chrome.extension.inIncognitoContext;
 
 startButton.addEventListener("click", () => startRecording(false));
 blankStartButton.addEventListener("click", () => startRecording(true));
 incognitoStartButton.addEventListener("click", startIncognitoRecording);
+recordingConsent.addEventListener("change", persistRecordingConsent);
+privacySettingsButton.addEventListener("click", showPrivacySettings);
+privacyDoneButton.addEventListener("click", collapsePrivacySettings);
 stopButton.addEventListener("click", finishRecording);
+discardButton.addEventListener("click", discardAndStartOver);
 clearViewButton.addEventListener("click", () => {
   requestList.replaceChildren();
   errors = 0;
@@ -79,6 +94,13 @@ chrome.runtime.onMessage.addListener(message => {
     case "transaction-started":
       renderTransactions();
       break;
+    case "recording-started":
+      applyStatus(message);
+      setStatus(`${message.incognito ? "Incognito recording" : "Recording"} started.`);
+      break;
+    case "recorder-start-failed":
+      showError(message.message || "Unable to start the recording");
+      break;
     case "recorder-detached":
       applyStatus(message.status || {active: true, attached: false});
       showError(message.message
@@ -105,41 +127,9 @@ initialize();
 
 async function initialize() {
   incognitoStartButton.hidden = inIncognitoContext;
-  if (await claimPendingIncognitoLaunch()) {
-    return;
-  }
+  await restoreRecordingConsent();
   await removeExpiredIncognitoLaunch();
   await restoreStatus();
-}
-
-async function claimPendingIncognitoLaunch() {
-  if (!inIncognitoContext) {
-    return false;
-  }
-  try {
-    const currentWindow = await chrome.windows.getCurrent();
-    const stored = await chrome.storage.local.get(INCOGNITO_LAUNCH_KEY);
-    const launch = stored[INCOGNITO_LAUNCH_KEY];
-    if (!isValidIncognitoLaunch(launch) || launch.windowId !== currentWindow.id) {
-      return false;
-    }
-    await chrome.storage.local.remove(INCOGNITO_LAUNCH_KEY);
-    startUrl.value = launch.startUrl;
-    disableCache.checked = launch.disableCache === true;
-    transactionName.value = launch.transactionName;
-    lastCommittedTransactionName = launch.transactionName.trim();
-    transactionNameDirty = false;
-    const started = await startRecording(true);
-    if (!started) {
-      await restoreStatus();
-    } else if (Number.isInteger(launch.launcherTabId)) {
-      await chrome.tabs.remove(launch.launcherTabId).catch(() => {});
-    }
-    return true;
-  } catch (error) {
-    showError(`Unable to start the incognito recorder: ${error.message}`);
-    return false;
-  }
 }
 
 async function removeExpiredIncognitoLaunch() {
@@ -158,11 +148,15 @@ function isValidIncognitoLaunch(launch) {
     && Number.isInteger(launch.windowId)
     && typeof launch.transactionName === "string"
     && typeof launch.startUrl === "string"
+    && launch.consentVersion === RECORDING_DISCLOSURE_VERSION
     && Number.isFinite(launch.createdAt)
     && Date.now() - launch.createdAt <= INCOGNITO_LAUNCH_TTL_MS;
 }
 
 async function startIncognitoRecording() {
+  if (!requireRecordingConsent()) {
+    return;
+  }
   setBusy(true);
   let launch;
   try {
@@ -181,6 +175,7 @@ async function startIncognitoRecording() {
       transactionName: transactionName.value.trim(),
       startUrl: startUrl.value.trim(),
       disableCache: disableCache.checked,
+      consentVersion: RECORDING_DISCLOSURE_VERSION,
       createdAt: Date.now()
     };
     await chrome.storage.local.set({[INCOGNITO_LAUNCH_KEY]: launch});
@@ -202,12 +197,7 @@ async function startIncognitoRecording() {
         launcherTabId: incognitoWindow.tabs?.[0]?.id ?? launcherReadyLaunch.launcherTabId
       };
       await chrome.storage.local.set({[INCOGNITO_LAUNCH_KEY]: launch});
-      try {
-        await chrome.sidePanel.open({windowId: incognitoWindow.id});
-        setStatus("Incognito recorder opened. Recording will start in that window.");
-      } catch (_ignored) {
-        setStatus("Incognito window opened. Choose Open recorder on the BreakTest page there.");
-      }
+      setStatus("Incognito window opened. Choose Open recorder on the BreakTest page there.");
     } else {
       setStatus("Incognito window opened. Choose Open recorder on the BreakTest page there.");
     }
@@ -254,20 +244,47 @@ async function restoreStatus() {
 }
 
 async function startRecording(createBlankTab) {
+  if (!requireRecordingConsent()) {
+    return false;
+  }
   setBusy(true);
+  let sourceTab;
+  let createdTab;
   try {
-    const [tab] = await chrome.tabs.query({active: true, lastFocusedWindow: true});
+    [sourceTab] = await chrome.tabs.query({active: true, lastFocusedWindow: true});
+    let tab = sourceTab;
+    if (createBlankTab) {
+      createdTab = await chrome.tabs.create({
+        windowId: sourceTab?.windowId,
+        url: "about:blank",
+        active: false
+      });
+      tab = createdTab;
+      await chrome.sidePanel.setOptions({
+        tabId: tab.id,
+        path: "sidepanel.html",
+        enabled: true
+      });
+      await chrome.tabs.update(tab.id, {active: true});
+      await chrome.sidePanel.open({tabId: tab.id});
+    }
     const response = await send({
       type: "start-recording",
       tabId: tab?.id,
       windowId: tab?.windowId,
       transactionName: transactionName.value,
       startUrl: startUrl.value,
-      createBlankTab,
+      createBlankTab: false,
+      preparedNewTab: Boolean(createdTab),
       disableCache: disableCache.checked
     });
     if (!response.ok) {
       throw new Error(response.error);
+    }
+    if (createdTab) {
+      if (typeof chrome.sidePanel.close === "function" && Number.isInteger(sourceTab?.id)) {
+        await chrome.sidePanel.close({tabId: sourceTab.id}).catch(() => {});
+      }
     }
     requestList.replaceChildren();
     errors = 0;
@@ -276,10 +293,14 @@ async function startRecording(createBlankTab) {
     setStatus(startUrl.value.trim()
       ? `${response.incognito ? "Incognito recording" : "Recording"} started and the start URL was opened.`
       : (createBlankTab
-        ? `${response.incognito ? "Incognito recording" : "Recording"} started in a blank tab.`
+        ? `${response.incognito ? "Incognito recording" : "Recording"} started in a new tab.`
         : `${response.incognito ? "Incognito recording" : "Recording"} the selected tab.`));
     return true;
   } catch (error) {
+    if (createdTab && Number.isInteger(sourceTab?.id)) {
+      await chrome.tabs.update(sourceTab.id, {active: true}).catch(() => {});
+      await chrome.tabs.remove(createdTab.id).catch(() => {});
+    }
     showError(error.message);
     return false;
   } finally {
@@ -327,33 +348,120 @@ function commitPendingTransaction() {
 
 async function finishRecording() {
   setBusy(true);
-  setStatus("Finishing pending requests and building HAR…");
+  setStatus(pendingHar
+    ? "Choose where to save the completed HAR…"
+    : "Finishing pending requests and building HAR…");
   try {
-    await commitPendingTransaction();
-    const response = await send({type: "stop-recording"});
-    if (!response.ok) {
-      throw new Error(response.error);
+    if (!pendingHar) {
+      await commitPendingTransaction();
+      const response = await send({type: "stop-recording"});
+      if (!response.ok) {
+        throw new Error(response.error);
+      }
+      pendingHar = response.har;
+      applyStatus({active: false, requestCount: pendingHar.log.entries.length, pendingCount: 0});
     }
-    downloadHar(response.har);
-    applyStatus({active: false, requestCount: response.har.log.entries.length, pendingCount: 0});
-    setStatus("HAR exported. Import it with File → Import HAR… in BreakTest.");
+    await downloadHar(pendingHar);
+    pendingHar = null;
+    updateRecordingControls();
+    setStatus("HAR saved. Import it with File → Import HAR… in BreakTest.");
   } catch (error) {
-    showError(error.message);
+    showError(pendingHar
+      ? `HAR was not saved: ${error.message}. Choose Save HAR to retry or Discard and start over.`
+      : error.message);
+  } finally {
+    setBusy(false);
+    updateRecordingControls();
+  }
+}
+
+async function discardAndStartOver() {
+  const discardingHar = Boolean(pendingHar);
+  const confirmed = window.confirm(discardingHar
+    ? "Discard the unsaved HAR and start over? This recording cannot be recovered."
+    : "Cancel this recording and discard all captured requests?");
+  if (!confirmed) {
+    return;
+  }
+  setBusy(true);
+  try {
+    if (active) {
+      const response = await send({type: "cancel-recording"});
+      if (!response.ok) {
+        throw new Error(response.error);
+      }
+    }
+    pendingHar = null;
+    resetRecordingView();
+    setStatus("Recording discarded. Ready to start again.");
+  } catch (error) {
+    showError(`Unable to discard the recording: ${error.message}`);
   } finally {
     setBusy(false);
   }
 }
 
-function downloadHar(har) {
+function resetRecordingView() {
+  clearTimeout(transactionCommitTimer);
+  requestList.replaceChildren();
+  transactionList.replaceChildren();
+  errors = 0;
+  errorCount.textContent = "0";
+  transactionName.value = DEFAULT_TRANSACTION_NAME;
+  lastCommittedTransactionName = DEFAULT_TRANSACTION_NAME;
+  transactionNameDirty = false;
+  applyStatus({active: false, requestCount: 0, pendingCount: 0, transactions: []});
+  updateRecordingControls();
+}
+
+async function downloadHar(har) {
   const json = JSON.stringify(har, null, 2);
-  const blob = new Blob([json], {type: "application/json"});
+  // Keep the explicit .har filename authoritative in the browser's Save As
+  // dialog. application/json can cause some platforms to replace or append
+  // the extension with .json even though HAR content is JSON.
+  const blob = new Blob([json], {type: "application/octet-stream"});
   const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
   const stamp = new Date().toISOString().replaceAll(":", "-").replace(/\.\d{3}Z$/, "Z");
-  anchor.href = url;
-  anchor.download = `breaktest-recording-${stamp}.har`;
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  try {
+    const downloadId = await chrome.downloads.download({
+      url,
+      filename: `breaktest-recording-${stamp}.har`,
+      saveAs: true
+    });
+    await waitForDownload(downloadId);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function waitForDownload(downloadId) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = error => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      chrome.downloads.onChanged.removeListener(onChanged);
+      error ? reject(error) : resolve();
+    };
+    const inspect = item => {
+      if (item?.state === "complete") {
+        finish();
+      } else if (item?.state === "interrupted") {
+        finish(new Error(item.error || "The download was interrupted"));
+      }
+    };
+    const onChanged = delta => {
+      if (delta.id === downloadId && delta.state) {
+        inspect({state: delta.state.current, error: delta.error?.current});
+      }
+    };
+    chrome.downloads.onChanged.addListener(onChanged);
+    chrome.downloads.search({id: downloadId})
+      .then(items => inspect(items[0]))
+      .catch(finish);
+  });
 }
 
 function applyStatus(status) {
@@ -379,11 +487,8 @@ function setActive(isActive) {
   active = isActive;
   startSetup.hidden = isActive;
   startActions.hidden = isActive;
-  startButton.disabled = busy || isActive;
-  blankStartButton.disabled = busy || isActive;
-  incognitoStartButton.disabled = busy || isActive;
-  stopButton.hidden = !isActive;
-  stopButton.disabled = busy || !isActive;
+  updateStartControls();
+  updateRecordingControls();
   transactionHint.hidden = !isActive;
   transactionName.disabled = false;
   if (!isActive) {
@@ -397,10 +502,85 @@ function setActive(isActive) {
 
 function setBusy(isBusy) {
   busy = isBusy;
-  startButton.disabled = busy || active;
-  blankStartButton.disabled = busy || active;
-  incognitoStartButton.disabled = busy || active;
-  stopButton.disabled = busy || !active;
+  updateStartControls();
+  updateRecordingControls();
+}
+
+function updateRecordingControls() {
+  const hasRecording = active;
+  const hasUnsavedHar = Boolean(pendingHar);
+  stopButton.textContent = hasUnsavedHar ? "Save HAR" : "Finish and export";
+  stopButton.hidden = !hasRecording && !hasUnsavedHar;
+  stopButton.disabled = busy || (!hasRecording && !hasUnsavedHar);
+  discardButton.textContent = hasUnsavedHar ? "Discard and start over" : "Cancel recording";
+  discardButton.hidden = !hasRecording && !hasUnsavedHar;
+  discardButton.disabled = busy || (!hasRecording && !hasUnsavedHar);
+}
+
+function requireRecordingConsent() {
+  if (recordingConsentAccepted) {
+    return true;
+  }
+  showError("Review and accept the recording data notice before starting.");
+  showPrivacySettings();
+  recordingConsent.focus();
+  return false;
+}
+
+function updateStartControls() {
+  const disabled = busy || active || Boolean(pendingHar) || !recordingConsentAccepted;
+  startButton.disabled = disabled;
+  blankStartButton.disabled = disabled;
+  incognitoStartButton.disabled = disabled;
+}
+
+async function restoreRecordingConsent() {
+  try {
+    const stored = await chrome.storage.local.get(RECORDING_CONSENT_KEY);
+    setRecordingConsentAccepted(
+      stored[RECORDING_CONSENT_KEY] === RECORDING_DISCLOSURE_VERSION,
+      true
+    );
+  } catch (_ignored) {
+    setRecordingConsentAccepted(false, false);
+  }
+}
+
+async function persistRecordingConsent() {
+  const accepted = recordingConsent.checked;
+  try {
+    if (accepted) {
+      await chrome.storage.local.set({[RECORDING_CONSENT_KEY]: RECORDING_DISCLOSURE_VERSION});
+    } else {
+      await chrome.storage.local.remove(RECORDING_CONSENT_KEY);
+    }
+    setRecordingConsentAccepted(accepted, accepted);
+  } catch (error) {
+    setRecordingConsentAccepted(false, false);
+    showError(`Unable to save recording consent: ${error.message}`);
+  }
+}
+
+function setRecordingConsentAccepted(accepted, collapse) {
+  recordingConsentAccepted = accepted;
+  recordingConsent.checked = accepted;
+  recordingDisclosure.hidden = accepted && collapse;
+  privacySummary.hidden = !(accepted && collapse);
+  privacyDoneButton.hidden = !accepted;
+  updateStartControls();
+}
+
+function showPrivacySettings() {
+  recordingDisclosure.hidden = false;
+  privacySummary.hidden = true;
+  privacyDoneButton.hidden = !recordingConsentAccepted;
+}
+
+function collapsePrivacySettings() {
+  if (recordingConsentAccepted) {
+    recordingDisclosure.hidden = true;
+    privacySummary.hidden = false;
+  }
 }
 
 function renderTransactions(transactions) {

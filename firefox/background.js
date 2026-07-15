@@ -77,6 +77,8 @@ async function handleMessage(message) {
       return startTransaction(message.name);
     case "stop-recording":
       return stopRecording();
+    case "cancel-recording":
+      return cancelRecording();
     case "recorder-status":
       return recorderStatus();
     default:
@@ -201,6 +203,13 @@ async function stopRecording() {
   recording = null;
   notify("recording-stopped", status);
   return {ok: true, har, status};
+}
+
+async function cancelRecording() {
+  await discardCurrentRecording();
+  const status = recorderStatus();
+  notify("recording-cancelled", status);
+  return status;
 }
 
 async function discardCurrentRecording() {

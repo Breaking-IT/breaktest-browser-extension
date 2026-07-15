@@ -44,21 +44,38 @@
         <input id="transaction-name" type="text" value="01_OpenHomepage" maxlength="120">
       </div>
       <div id="start-actions" class="start-actions">
+        <div id="recording-disclosure" class="privacy-disclosure" role="note">
+          <strong>Recording data</strong>
+          <p id="recording-disclosure-text">Captures URLs, headers, cookies, and request and response bodies from the selected tab. Data stays in this browser until you export the HAR.</p>
+          <label class="checkbox-option consent-option" for="recording-consent">
+            <input id="recording-consent" type="checkbox" aria-describedby="recording-disclosure-text">
+            I understand and want to record this traffic
+          </label>
+          <div class="privacy-actions">
+            <a href="https://github.com/Breaking-IT/breaktest-browser-extension/blob/main/PRIVACY.md" target="_blank" rel="noopener noreferrer">Privacy policy</a>
+            <button id="privacy-done-button" class="quiet" type="button" hidden>Done</button>
+          </div>
+        </div>
         <label class="checkbox-option" for="disable-cache">
           <input id="disable-cache" type="checkbox">
           Disable browser cache while recording
         </label>
         <div class="control-row start-controls">
-          <button id="blank-start-button" class="primary">Start in blank tab</button>
-          <button id="start-button">Start current tab</button>
+          <button id="blank-start-button" class="primary" disabled>Start in new tab</button>
+          <button id="start-button" disabled>Start current tab</button>
         </div>
         <div class="control-row">
-          <button id="private-start-button" class="private">Start in private window</button>
+          <button id="private-start-button" class="private" disabled>Start in private window</button>
         </div>
         <p class="hint">The recorder starts before opening the Start URL. New session cookies remain enabled so login flows work.</p>
+        <div id="privacy-summary" class="privacy-summary" hidden>
+          <span>Recording consent saved</span>
+          <button id="privacy-settings-button" class="quiet" type="button">Privacy &amp; settings</button>
+        </div>
       </div>
       <div class="control-row recording-controls">
         <button id="stop-button" class="danger" disabled hidden>Finish and export</button>
+        <button id="discard-button" disabled hidden>Cancel recording</button>
       </div>
       <p id="transaction-hint" class="hint" hidden>Type the next transaction name, then move the pointer toward the action you want to record. The new name is applied after typing stops.</p>
     </section>

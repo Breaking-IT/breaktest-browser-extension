@@ -20,12 +20,33 @@ const MAX_BODY_CHARS = 2 * 1024 * 1024;
 const NETWORK_TOTAL_BUFFER_BYTES = 48 * 1024 * 1024;
 const NETWORK_RESOURCE_BUFFER_BYTES = 24 * 1024 * 1024;
 const MAX_VISIBLE_REQUESTS = 1000;
+const SIDE_PANEL_PATH = "sidepanel.html";
+const INCOGNITO_LAUNCH_KEY = "pendingIncognitoLaunch";
+const RECORDING_DISCLOSURE_VERSION = 1;
 
 let recording = null;
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.sidePanel.setPanelBehavior({openPanelOnActionClick: true}).catch(() => {});
+  configureExistingTabPanels().catch(error => console.error(error));
 });
+
+chrome.runtime.onStartup.addListener(() => {
+  configureExistingTabPanels().catch(error => console.error(error));
+});
+
+chrome.tabs.onCreated.addListener(tab => {
+  configureTabPanel(tab.id).catch(error => console.error(error));
+});
+
+chrome.tabs.onReplaced.addListener(addedTabId => {
+  configureTabPanel(addedTabId).catch(error => console.error(error));
+});
+
+chrome.sidePanel
+  .setPanelBehavior({openPanelOnActionClick: true})
+  .catch(error => console.error(error));
+
+configureExistingTabPanels().catch(error => console.error(error));
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   handleMessage(message)
@@ -66,14 +87,50 @@ async function handleMessage(message) {
   switch (message?.type) {
     case "start-recording":
       return startRecording(message);
+    case "start-incognito-recording":
+      return startIncognitoRecording(message);
     case "new-transaction":
       return startTransaction(message.name);
     case "stop-recording":
       return stopRecording();
+    case "cancel-recording":
+      return cancelRecording();
     case "recorder-status":
       return recorderStatus();
     default:
       return {ok: false, error: "Unknown recorder command"};
+  }
+}
+
+async function startIncognitoRecording(message) {
+  try {
+    const stored = await chrome.storage.local.get(INCOGNITO_LAUNCH_KEY);
+    const launch = stored[INCOGNITO_LAUNCH_KEY];
+    if (!launch
+        || launch.nonce !== message.nonce
+        || launch.consentVersion !== RECORDING_DISCLOSURE_VERSION
+        || !Number.isInteger(launch.windowId)
+        || !Number.isInteger(launch.launcherTabId)) {
+      throw new Error("The incognito recorder launch instruction is invalid or expired");
+    }
+    const launcherTab = await chrome.tabs.get(launch.launcherTabId);
+    if (!launcherTab.incognito || launcherTab.windowId !== launch.windowId) {
+      throw new Error("The incognito launcher tab no longer belongs to this recording window");
+    }
+    const result = await startRecording({
+      tabId: launch.launcherTabId,
+      windowId: launch.windowId,
+      transactionName: launch.transactionName,
+      startUrl: launch.startUrl,
+      createBlankTab: false,
+      prepareCurrentTabAsBlank: true,
+      disableCache: launch.disableCache === true
+    });
+    await chrome.storage.local.remove(INCOGNITO_LAUNCH_KEY);
+    return result;
+  } catch (error) {
+    notify("recorder-start-failed", {message: errorMessage(error)});
+    throw error;
   }
 }
 
@@ -85,12 +142,17 @@ async function startRecording(message) {
   }
   const startUrl = normalizeStartUrl(message.startUrl);
   const createBlankTab = message.createBlankTab === true;
+  const preparedNewTab = message.preparedNewTab === true;
+  const prepareCurrentTabAsBlank = message.prepareCurrentTabAsBlank === true;
+  if ([createBlankTab, preparedNewTab, prepareCurrentTabAsBlank].filter(Boolean).length > 1) {
+    throw new Error("Choose only one new-tab recording mode");
+  }
   let tab;
   if (createBlankTab) {
     tab = await chrome.tabs.create({
       windowId: Number.isInteger(message.windowId) ? message.windowId : undefined,
       url: "about:blank",
-      active: true
+      active: false
     });
     tabId = tab.id;
   } else {
@@ -99,13 +161,22 @@ async function startRecording(message) {
     }
     tab = await chrome.tabs.get(tabId);
   }
-  if (isBrowserNewTab(tab.url)) {
+  if (prepareCurrentTabAsBlank) {
+    const launcherUrl = chrome.runtime.getURL("incognito-launch.html");
+    if (!tab.incognito || !tab.url?.startsWith(launcherUrl)) {
+      throw new Error("Only the active incognito launcher tab can be prepared for recording");
+    }
+    tab = await chrome.tabs.update(tabId, {url: "about:blank"});
+  } else if (isBrowserNewTab(tab.url)) {
     await chrome.tabs.update(tabId, {url: "about:blank"});
     tab = await chrome.tabs.get(tabId);
   }
-  if (!createBlankTab && !isRecordableUrl(tab.url)) {
+  if (!createBlankTab
+      && !preparedNewTab
+      && !prepareCurrentTabAsBlank
+      && !isRecordableUrl(tab.pendingUrl || tab.url)) {
     throw new Error(
-      "This Chrome internal page cannot be recorded. Open a New Tab or an HTTP/HTTPS page."
+      "This Chrome internal page cannot be recorded. Enter a Start URL or open an HTTP/HTTPS page."
     );
   }
   if (recording) {
@@ -138,6 +209,9 @@ async function startRecording(message) {
     await chrome.debugger.attach({tabId}, PROTOCOL_VERSION);
     recording.attached = true;
     await configureRootTarget(tabId);
+    if (createBlankTab) {
+      await moveRecorderToTab(tabId);
+    }
     if (startUrl) {
       const navigation = await chrome.debugger.sendCommand({tabId}, "Page.navigate", {url: startUrl});
       if (navigation?.errorText) {
@@ -152,6 +226,28 @@ async function startRecording(message) {
   setRecordingBadge(true);
   notify("recording-started", recorderStatus());
   return recorderStatus();
+}
+
+async function configureExistingTabPanels() {
+  await chrome.sidePanel.setPanelBehavior({openPanelOnActionClick: true});
+  const tabs = await chrome.tabs.query({});
+  await Promise.all(tabs
+    .filter(tab => Number.isInteger(tab.id))
+    .map(tab => configureTabPanel(tab.id)));
+}
+
+async function configureTabPanel(tabId) {
+  await chrome.sidePanel.setOptions({
+    tabId,
+    path: SIDE_PANEL_PATH,
+    enabled: true
+  });
+}
+
+async function moveRecorderToTab(targetTabId) {
+  await configureTabPanel(targetTabId);
+  await chrome.tabs.update(targetTabId, {active: true});
+  await chrome.sidePanel.open({tabId: targetTabId}).catch(() => {});
 }
 
 async function configureRootTarget(tabId) {
@@ -280,6 +376,13 @@ async function stopRecording() {
   recording = null;
   notify("recording-stopped", status);
   return {ok: true, har, status};
+}
+
+async function cancelRecording() {
+  await discardCurrentRecording();
+  const status = recorderStatus();
+  notify("recording-cancelled", status);
+  return status;
 }
 
 async function discardCurrentRecording() {
