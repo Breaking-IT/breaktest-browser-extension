@@ -17,5 +17,10 @@ Place promotional artwork in `promotional/`:
 - `small-440x280.png` for the Chrome/Edge small promotional tile
 - `marquee-1400x560.png` for the optional Chrome marquee tile
 
+The editable vector source for the BreakTest mark is
+`brand/breaktest-logo.svg`. Use that file when rendering store artwork; the
+browser-extension PNG icons are rasterized application icons and should not be
+scaled up for promotional material.
+
 Do not include customer domains, credentials, cookies, tokens, or real HAR
 content in any store image.
