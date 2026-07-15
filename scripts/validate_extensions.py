@@ -175,6 +175,15 @@ def validate() -> list[str]:
             errors.append(f"{browser}: private-window launches do not carry consent state")
         if "saveAs: true" not in panel_script:
             errors.append(f"{browser}: HAR export does not require a Save As dialog")
+        if "Start in new tab" not in panel:
+            errors.append(f"{browser}: the new-tab recording action is not clearly labelled")
+        if "discard-button" not in panel or 'type: "cancel-recording"' not in panel_script:
+            errors.append(f"{browser}: recordings cannot be explicitly discarded")
+
+        background_file = "service-worker.js" if browser == "chrome" else "background.js"
+        background_source = (ROOT / browser / background_file).read_text(encoding="utf-8")
+        if 'case "cancel-recording"' not in background_source:
+            errors.append(f"{browser}: the background recorder cannot cancel an active recording")
 
     chrome_worker = (ROOT / "chrome" / "service-worker.js").read_text(encoding="utf-8")
     if "openPanelOnActionClick: true" not in chrome_worker:
@@ -185,6 +194,8 @@ def validate() -> list[str]:
         errors.append("chrome: incognito launcher tab is not reused for recording")
     if 'case "start-incognito-recording"' not in chrome_worker:
         errors.append("chrome: incognito launcher cannot start recording directly")
+    if "preparedNewTab" not in chrome_worker:
+        errors.append("chrome: extension-created new tabs are not distinguished from internal pages")
     if manifests["chrome"].get("side_panel"):
         errors.append("chrome: a manifest-level side panel would make the recorder global")
 

@@ -46,9 +46,9 @@ after restarting Firefox. Changes to the extension source also require using
 2. Enter the **Start URL**.
 3. Keep `01_OpenHomepage` as the initial transaction name, or replace it.
 4. Optionally select **Disable browser cache while recording**.
-5. Choose **Start in blank tab**.
+5. Choose **Start in new tab**.
 
-The extension creates a blank tab, activates capture, and then navigates to the
+The extension creates a new tab, activates capture, and then navigates to the
 Start URL. **Start current tab** only captures requests that begin after the
 recorder starts; it cannot recover the page's original load.
 
@@ -102,7 +102,7 @@ until the last private window closes.
 ## Troubleshooting
 
 If an internal Firefox page cannot be recorded, enter an HTTP or HTTPS Start
-URL and use **Start in blank tab**. If the private launcher cannot start, verify
+URL and use **Start in new tab**. If the private launcher cannot start, verify
 **Run in Private Windows** is allowed, close the private window, reload the
 temporary add-on, and try again.
 

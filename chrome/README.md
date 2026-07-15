@@ -66,22 +66,22 @@ Chrome and Edge use the same extension files. No separate Edge build is needed.
 3. Keep the initial transaction name `01_OpenHomepage`, or replace it.
 4. Optionally select **Disable browser cache while recording** when you need a
    forced cold-cache recording. It is off by default.
-5. Choose **Start in blank tab**.
+5. Choose **Start in new tab**.
 
-The extension creates a blank tab, attaches the DevTools recorder, and only
+The extension creates a new tab, attaches the DevTools recorder, and only
 then opens the Start URL. This ordering captures the homepage document request
 and all resources loaded by it.
 
 The recorder panel belongs to the tab where it was opened. Chrome and Edge
 hide it when you switch to another tab and show it again when you return. When
-**Start in blank tab** is used, the extension moves the recorder panel to the
+**Start in new tab** is used, the extension moves the recorder panel to the
 new recording tab.
 
 **Start current tab** records only requests that start after the recorder has
 attached. It cannot recover the requests that originally loaded the page.
 
 Chrome internal pages, extension pages, and browser settings cannot be
-recorded. Enter a Start URL and use **Start in blank tab** instead.
+recorded. Enter a Start URL and use **Start in new tab** instead.
 
 ## Name transactions while recording
 
@@ -161,7 +161,7 @@ The browser does not automatically update an unpacked extension.
 
 The selected tab is a New Tab, settings page, extension page, or another
 protected browser page. Enter the application URL in **Start URL** and choose
-**Start in blank tab**.
+**Start in new tab**.
 
 ### The recorder is missing in a private window
 

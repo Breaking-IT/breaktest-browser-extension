@@ -22,7 +22,7 @@ Record browser traffic as a local HAR file with named BreakTest transactions.
 BreakTest Browser Recorder captures HTTP and HTTPS traffic directly through
 the browser's debugging and web-request APIs. It does not require a proxy.
 
-Start recording in the current tab, a prepared blank tab, or a private browser
+Start recording in the current tab, a prepared new tab, or a private browser
 window. Enter transaction names while you work so BreakTest can turn them into
 Transaction Controllers when the HAR is imported.
 

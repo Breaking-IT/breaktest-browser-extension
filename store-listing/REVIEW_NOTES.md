@@ -16,7 +16,7 @@ recording and export flow.
 3. Review the recording-data notice and select **I understand and want to
    record this traffic**. The notice collapses after acceptance and can be
    reopened from **Privacy & settings**.
-4. Choose **Start in blank tab**.
+4. Choose **Start in new tab**.
 5. Wait for the document request to appear under **Live requests**.
 6. Change the transaction name to `02_ExampleNavigation`, move the pointer out
    of the field, and navigate or reload the test page.
@@ -42,7 +42,8 @@ required.
   cache-restoration state use local extension storage.
 - Export is initiated by the user and opens the browser's native Save As dialog
   through the `downloads` API. Cancelling keeps the completed HAR available in
-  the open recorder so **Save HAR** can retry.
+  the open recorder so **Save HAR** can retry, or **Discard and start over**
+  can explicitly delete it.
 
 ## Chromium-specific review notes
 
@@ -54,7 +55,7 @@ the browser permits only one debugger client.
 
 The Chrome/Edge side panel is configured per tab. It is hidden when another
 tab is selected and is transferred to the newly created tab when **Start in
-blank tab** is used.
+new tab** is used.
 
 Incognito access is optional. If enabled by the reviewer, **Start in incognito
 window** opens a launcher in a new private window and requires one browser-

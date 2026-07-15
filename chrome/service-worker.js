@@ -93,6 +93,8 @@ async function handleMessage(message) {
       return startTransaction(message.name);
     case "stop-recording":
       return stopRecording();
+    case "cancel-recording":
+      return cancelRecording();
     case "recorder-status":
       return recorderStatus();
     default:
@@ -140,9 +142,10 @@ async function startRecording(message) {
   }
   const startUrl = normalizeStartUrl(message.startUrl);
   const createBlankTab = message.createBlankTab === true;
+  const preparedNewTab = message.preparedNewTab === true;
   const prepareCurrentTabAsBlank = message.prepareCurrentTabAsBlank === true;
-  if (createBlankTab && prepareCurrentTabAsBlank) {
-    throw new Error("Choose either a new blank tab or the current launcher tab");
+  if ([createBlankTab, preparedNewTab, prepareCurrentTabAsBlank].filter(Boolean).length > 1) {
+    throw new Error("Choose only one new-tab recording mode");
   }
   let tab;
   if (createBlankTab) {
@@ -168,9 +171,12 @@ async function startRecording(message) {
     await chrome.tabs.update(tabId, {url: "about:blank"});
     tab = await chrome.tabs.get(tabId);
   }
-  if (!createBlankTab && !prepareCurrentTabAsBlank && !isRecordableUrl(tab.url)) {
+  if (!createBlankTab
+      && !preparedNewTab
+      && !prepareCurrentTabAsBlank
+      && !isRecordableUrl(tab.pendingUrl || tab.url)) {
     throw new Error(
-      "This Chrome internal page cannot be recorded. Open a New Tab or an HTTP/HTTPS page."
+      "This Chrome internal page cannot be recorded. Enter a Start URL or open an HTTP/HTTPS page."
     );
   }
   if (recording) {
@@ -370,6 +376,13 @@ async function stopRecording() {
   recording = null;
   notify("recording-stopped", status);
   return {ok: true, har, status};
+}
+
+async function cancelRecording() {
+  await discardCurrentRecording();
+  const status = recorderStatus();
+  notify("recording-cancelled", status);
+  return status;
 }
 
 async function discardCurrentRecording() {
