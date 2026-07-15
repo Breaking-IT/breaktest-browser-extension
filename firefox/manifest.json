@@ -2,10 +2,12 @@
   "manifest_version": 3,
   "name": "BreakTest Browser Recorder",
   "description": "Record a Firefox session as HAR with named BreakTest transactions.",
-  "version": "0.5.0",
+  "version": "1.0.0",
+  "author": "Breaking IT",
+  "homepage_url": "https://github.com/Breaking-IT/breaktest-browser-extension",
   "permissions": [
-    "activeTab",
     "browserSettings",
+    "downloads",
     "storage",
     "tabs",
     "webRequest",
@@ -46,7 +48,10 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "browser-recorder@breaktest.io",
-      "strict_min_version": "128.0"
+      "data_collection_permissions": {
+        "required": ["none"]
+      },
+      "strict_min_version": "142.0"
     }
   }
 }

@@ -24,7 +24,7 @@ instead of the Chromium DevTools protocol.
 
 ## Requirements
 
-- Firefox 128 or newer.
+- Firefox 142 or newer.
 - A local checkout of this repository containing the `firefox` directory.
 
 ## Install temporarily
@@ -68,6 +68,11 @@ original transaction.
 Choose **Finish and export** to download the HAR. In BreakTest, use
 **File > Import HAR...** and select that file. BreakTest turns the recorded
 names into Transaction Controllers.
+
+Firefox opens its native Save As dialog so you can change the suggested HAR
+filename and select a folder. Firefox sidebars are window-wide, so the recorder
+remains visible when you switch tabs in the same window. This differs from the
+tab-specific recorder panel in Chrome and Edge.
 
 ## Private-window recording
 

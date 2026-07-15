@@ -72,6 +72,11 @@ The extension creates a blank tab, attaches the DevTools recorder, and only
 then opens the Start URL. This ordering captures the homepage document request
 and all resources loaded by it.
 
+The recorder panel belongs to the tab where it was opened. Chrome and Edge
+hide it when you switch to another tab and show it again when you return. When
+**Start in blank tab** is used, the extension moves the recorder panel to the
+new recording tab.
+
 **Start current tab** records only requests that start after the recorder has
 attached. It cannot recover the requests that originally loaded the page.
 
@@ -101,7 +106,8 @@ body.
 ## Finish and import into BreakTest
 
 1. Choose **Finish and export**.
-2. The browser downloads a `breaktest-recording-<timestamp>.har` file.
+2. In the browser's Save As dialog, choose the HAR filename and folder. The
+   suggested name is `breaktest-recording-<timestamp>.har`.
 3. Open BreakTest.
 4. Choose **File > Import HAR...**.
 5. Select the downloaded HAR and complete the import wizard.
@@ -128,8 +134,10 @@ InPrivate window there.
 5. Choose **Start in incognito window**.
 6. If the side panel does not open automatically, choose **Open recorder** on
    the BreakTest launcher page in the private window.
-7. Record and export the scenario normally.
-8. Close the private window to discard its temporary cookies and storage.
+7. The launcher tab becomes the recording tab, keeping the recorder panel open
+   while capture starts before the Start URL loads.
+8. Record and export the scenario normally.
+9. Close the private window to discard its temporary cookies and storage.
 
 Cookies created during the recording remain available until that private
 session is closed. This is intentional because multi-step authentication flows

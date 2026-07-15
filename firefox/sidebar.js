@@ -18,6 +18,11 @@
 const transactionName = document.querySelector("#transaction-name");
 const startUrl = document.querySelector("#start-url");
 const disableCache = document.querySelector("#disable-cache");
+const recordingConsent = document.querySelector("#recording-consent");
+const recordingDisclosure = document.querySelector("#recording-disclosure");
+const privacySummary = document.querySelector("#privacy-summary");
+const privacySettingsButton = document.querySelector("#privacy-settings-button");
+const privacyDoneButton = document.querySelector("#privacy-done-button");
 const startSetup = document.querySelector("#start-setup");
 const startActions = document.querySelector("#start-actions");
 const startButton = document.querySelector("#start-button");
@@ -37,6 +42,7 @@ const requestList = document.querySelector("#request-list");
 let active = false;
 let busy = false;
 let errors = 0;
+let pendingHar = null;
 let lastCommittedTransactionName = transactionName.value.trim();
 let transactionNameDirty = false;
 let lastTransactionInputAt = 0;
@@ -45,12 +51,18 @@ let transactionCommitPromise = Promise.resolve();
 const TRANSACTION_TYPING_SETTLE_MS = 250;
 const PRIVATE_LAUNCH_KEY = "pendingPrivateLaunch";
 const PRIVATE_LAUNCH_TTL_MS = 60_000;
+const RECORDING_CONSENT_KEY = "recordingDisclosureAcceptedVersion";
+const RECORDING_DISCLOSURE_VERSION = 1;
+let recordingConsentAccepted = false;
 let inPrivateContext = false;
 const keepAlivePort = browser.runtime.connect({name: "recorder-ui"});
 
 startButton.addEventListener("click", () => startRecording(false));
 blankStartButton.addEventListener("click", () => startRecording(true));
 privateStartButton.addEventListener("click", startPrivateRecording);
+recordingConsent.addEventListener("change", persistRecordingConsent);
+privacySettingsButton.addEventListener("click", showPrivacySettings);
+privacyDoneButton.addEventListener("click", collapsePrivacySettings);
 stopButton.addEventListener("click", finishRecording);
 clearViewButton.addEventListener("click", () => {
   requestList.replaceChildren();
@@ -108,6 +120,7 @@ async function initialize() {
   const currentWindow = await browser.windows.getCurrent();
   inPrivateContext = currentWindow.incognito === true;
   privateStartButton.hidden = inPrivateContext;
+  await restoreRecordingConsent();
   if (await claimPendingPrivateLaunch()) {
     return;
   }
@@ -129,6 +142,7 @@ async function claimPendingPrivateLaunch() {
     await browser.storage.local.remove(PRIVATE_LAUNCH_KEY);
     startUrl.value = launch.startUrl;
     disableCache.checked = launch.disableCache === true;
+    setRecordingConsentAccepted(launch.consentVersion === RECORDING_DISCLOSURE_VERSION, true);
     transactionName.value = launch.transactionName;
     lastCommittedTransactionName = launch.transactionName.trim();
     transactionNameDirty = false;
@@ -161,11 +175,15 @@ function isValidPrivateLaunch(launch) {
     && Number.isInteger(launch.windowId)
     && typeof launch.transactionName === "string"
     && typeof launch.startUrl === "string"
+    && launch.consentVersion === RECORDING_DISCLOSURE_VERSION
     && Number.isFinite(launch.createdAt)
     && Date.now() - launch.createdAt <= PRIVATE_LAUNCH_TTL_MS;
 }
 
 async function startPrivateRecording() {
+  if (!requireRecordingConsent()) {
+    return;
+  }
   setBusy(true);
   let launch;
   try {
@@ -184,6 +202,7 @@ async function startPrivateRecording() {
       transactionName: transactionName.value.trim(),
       startUrl: startUrl.value.trim(),
       disableCache: disableCache.checked,
+      consentVersion: RECORDING_DISCLOSURE_VERSION,
       createdAt: Date.now()
     };
     await browser.storage.local.set({[PRIVATE_LAUNCH_KEY]: launch});
@@ -252,6 +271,9 @@ async function restoreStatus() {
 }
 
 async function startRecording(createBlankTab) {
+  if (!requireRecordingConsent()) {
+    return false;
+  }
   setBusy(true);
   try {
     const [tab] = await browser.tabs.query({active: true, lastFocusedWindow: true});
@@ -325,33 +347,86 @@ function commitPendingTransaction() {
 
 async function finishRecording() {
   setBusy(true);
-  setStatus("Finishing pending requests and building HAR…");
+  setStatus(pendingHar
+    ? "Choose where to save the completed HAR…"
+    : "Finishing pending requests and building HAR…");
   try {
-    await commitPendingTransaction();
-    const response = await send({type: "stop-recording"});
-    if (!response.ok) {
-      throw new Error(response.error);
+    if (!pendingHar) {
+      await commitPendingTransaction();
+      const response = await send({type: "stop-recording"});
+      if (!response.ok) {
+        throw new Error(response.error);
+      }
+      pendingHar = response.har;
+      applyStatus({active: false, requestCount: pendingHar.log.entries.length, pendingCount: 0});
     }
-    downloadHar(response.har);
-    applyStatus({active: false, requestCount: response.har.log.entries.length, pendingCount: 0});
-    setStatus("HAR exported. Import it with File → Import HAR… in BreakTest.");
+    await downloadHar(pendingHar);
+    pendingHar = null;
+    stopButton.textContent = "Finish and export";
+    stopButton.hidden = true;
+    setStatus("HAR saved. Import it with File → Import HAR… in BreakTest.");
   } catch (error) {
-    showError(error.message);
+    showError(pendingHar
+      ? `HAR was not saved: ${error.message}. Choose Save HAR to try again.`
+      : error.message);
   } finally {
     setBusy(false);
+    if (pendingHar) {
+      stopButton.textContent = "Save HAR";
+      stopButton.hidden = false;
+      stopButton.disabled = false;
+    }
   }
 }
 
-function downloadHar(har) {
+async function downloadHar(har) {
   const json = JSON.stringify(har, null, 2);
-  const blob = new Blob([json], {type: "application/json"});
+  // Keep the explicit .har filename authoritative in the browser's Save As
+  // dialog. application/json can cause some platforms to replace or append
+  // the extension with .json even though HAR content is JSON.
+  const blob = new Blob([json], {type: "application/octet-stream"});
   const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
   const stamp = new Date().toISOString().replaceAll(":", "-").replace(/\.\d{3}Z$/, "Z");
-  anchor.href = url;
-  anchor.download = `breaktest-recording-${stamp}.har`;
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  try {
+    const downloadId = await browser.downloads.download({
+      url,
+      filename: `breaktest-recording-${stamp}.har`,
+      saveAs: true
+    });
+    await waitForDownload(downloadId);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function waitForDownload(downloadId) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = error => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      browser.downloads.onChanged.removeListener(onChanged);
+      error ? reject(error) : resolve();
+    };
+    const inspect = item => {
+      if (item?.state === "complete") {
+        finish();
+      } else if (item?.state === "interrupted") {
+        finish(new Error(item.error || "The download was interrupted"));
+      }
+    };
+    const onChanged = delta => {
+      if (delta.id === downloadId && delta.state) {
+        inspect({state: delta.state.current, error: delta.error?.current});
+      }
+    };
+    browser.downloads.onChanged.addListener(onChanged);
+    browser.downloads.search({id: downloadId})
+      .then(items => inspect(items[0]))
+      .catch(finish);
+  });
 }
 
 function applyStatus(status) {
@@ -377,9 +452,7 @@ function setActive(isActive) {
   active = isActive;
   startSetup.hidden = isActive;
   startActions.hidden = isActive;
-  startButton.disabled = busy || isActive;
-  blankStartButton.disabled = busy || isActive;
-  privateStartButton.disabled = busy || isActive;
+  updateStartControls();
   stopButton.hidden = !isActive;
   stopButton.disabled = busy || !isActive;
   transactionHint.hidden = !isActive;
@@ -395,10 +468,74 @@ function setActive(isActive) {
 
 function setBusy(isBusy) {
   busy = isBusy;
-  startButton.disabled = busy || active;
-  blankStartButton.disabled = busy || active;
-  privateStartButton.disabled = busy || active;
+  updateStartControls();
   stopButton.disabled = busy || !active;
+}
+
+function requireRecordingConsent() {
+  if (recordingConsentAccepted) {
+    return true;
+  }
+  showError("Review and accept the recording data notice before starting.");
+  showPrivacySettings();
+  recordingConsent.focus();
+  return false;
+}
+
+function updateStartControls() {
+  const disabled = busy || active || Boolean(pendingHar) || !recordingConsentAccepted;
+  startButton.disabled = disabled;
+  blankStartButton.disabled = disabled;
+  privateStartButton.disabled = disabled;
+}
+
+async function restoreRecordingConsent() {
+  try {
+    const stored = await browser.storage.local.get(RECORDING_CONSENT_KEY);
+    setRecordingConsentAccepted(
+      stored[RECORDING_CONSENT_KEY] === RECORDING_DISCLOSURE_VERSION,
+      true
+    );
+  } catch (_ignored) {
+    setRecordingConsentAccepted(false, false);
+  }
+}
+
+async function persistRecordingConsent() {
+  const accepted = recordingConsent.checked;
+  try {
+    if (accepted) {
+      await browser.storage.local.set({[RECORDING_CONSENT_KEY]: RECORDING_DISCLOSURE_VERSION});
+    } else {
+      await browser.storage.local.remove(RECORDING_CONSENT_KEY);
+    }
+    setRecordingConsentAccepted(accepted, accepted);
+  } catch (error) {
+    setRecordingConsentAccepted(false, false);
+    showError(`Unable to save recording consent: ${error.message}`);
+  }
+}
+
+function setRecordingConsentAccepted(accepted, collapse) {
+  recordingConsentAccepted = accepted;
+  recordingConsent.checked = accepted;
+  recordingDisclosure.hidden = accepted && collapse;
+  privacySummary.hidden = !(accepted && collapse);
+  privacyDoneButton.hidden = !accepted;
+  updateStartControls();
+}
+
+function showPrivacySettings() {
+  recordingDisclosure.hidden = false;
+  privacySummary.hidden = true;
+  privacyDoneButton.hidden = !recordingConsentAccepted;
+}
+
+function collapsePrivacySettings() {
+  if (recordingConsentAccepted) {
+    recordingDisclosure.hidden = true;
+    privacySummary.hidden = false;
+  }
 }
 
 function renderTransactions(transactions) {

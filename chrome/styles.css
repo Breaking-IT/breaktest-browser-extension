@@ -94,6 +94,14 @@ label { color: var(--muted); font-size: 12px; font-weight: 600; }
 input { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 6px; padding: 8px; background: var(--background); color: var(--text); }
 .checkbox-option { display: flex; align-items: center; gap: 7px; font-weight: 500; }
 .checkbox-option input { flex: none; width: 14px; height: 14px; margin: 0; padding: 0; }
+.privacy-disclosure { display: grid; gap: 6px; padding: 9px; border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--border)); border-radius: 6px; background: color-mix(in srgb, var(--primary) 7%, var(--surface)); font-size: 11px; line-height: 1.4; }
+.privacy-disclosure p { color: var(--muted); }
+.privacy-disclosure a { width: fit-content; color: var(--primary); }
+.consent-option { align-items: flex-start; color: var(--text); }
+.consent-option input { margin-top: 1px; }
+.privacy-actions, .privacy-summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.privacy-summary { min-height: 24px; color: var(--muted); font-size: 11px; }
+.privacy-summary .quiet, .privacy-actions .quiet { color: var(--primary); }
 button { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; background: var(--surface); color: var(--text); cursor: pointer; }
 button:hover:not(:disabled) { border-color: var(--primary); }
 button:disabled { opacity: .45; cursor: default; }

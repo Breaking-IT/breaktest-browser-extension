@@ -25,14 +25,28 @@ const transactionText = document.querySelector("#launch-transaction");
 const urlText = document.querySelector("#launch-url");
 
 let currentWindowId;
+let currentTabId;
+let currentLaunch;
 const launchNonce = new URL(location.href).searchParams.get("launch");
 
 openButton.addEventListener("click", async () => {
   openButton.disabled = true;
   statusText.textContent = "Opening the recorder…";
   try {
-    await chrome.sidePanel.open({windowId: currentWindowId});
+    await chrome.sidePanel.setOptions({
+      tabId: currentTabId,
+      path: "sidepanel.html",
+      enabled: true
+    });
+    await chrome.sidePanel.open({tabId: currentTabId});
     statusText.textContent = "Recorder opened. Starting the recording…";
+    const response = await chrome.runtime.sendMessage({
+      type: "start-incognito-recording",
+      nonce: currentLaunch.nonce
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || "Unable to start the incognito recording");
+    }
   } catch (error) {
     statusText.textContent = `Unable to open the recorder: ${error.message}`;
     openButton.disabled = false;
@@ -60,6 +74,7 @@ async function initialize() {
       throw new Error("Chrome did not provide the launcher tab details");
     }
     currentWindowId = currentTab.windowId;
+    currentTabId = currentTab.id;
     const stored = await chrome.storage.local.get(INCOGNITO_LAUNCH_KEY);
     const launch = stored[INCOGNITO_LAUNCH_KEY];
     if (!isValidLaunch(launch) || launch.nonce !== launchNonce) {
@@ -83,6 +98,7 @@ function showLaunch(launch) {
       || launch.windowId !== currentWindowId) {
     return;
   }
+  currentLaunch = launch;
   transactionText.textContent = launch.transactionName;
   urlText.textContent = launch.startUrl || "Blank page";
   details.hidden = false;
