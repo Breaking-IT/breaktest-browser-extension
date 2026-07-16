@@ -90,8 +90,12 @@ them because they may contain credentials and personal data.
 
 ## Chrome Web Store Limited Use
 
-The use of information received from Google APIs will adhere to the Chrome Web
-Store User Data Policy, including the Limited Use requirements.
+BreakTest Browser Recorder's collection and use of user data adhere to the
+Chrome Web Store User Data Policy, including its Limited Use requirements.
+Recorded data is used only to provide the single, user-facing purpose
+described in this policy: creating the HAR file you explicitly request. It is
+not sold, is not used for advertising or creditworthiness, and is not
+transferred to third parties.
 
 ## Security
 
