@@ -39,9 +39,12 @@ def source_files(browser: str) -> list[Path]:
 def write_package(browser: str, package_label: str, version: str) -> Path:
     browser_dir = ROOT / browser
     destination = DIST / f"breaktest-browser-recorder-{package_label}-{version}.zip"
+    # The source headers reference "the LICENSE file at the root of this
+    # distribution", so the packaged ZIP must carry it alongside the sources.
+    members = [(source.relative_to(browser_dir).as_posix(), source) for source in source_files(browser)]
+    members.append(("LICENSE", ROOT / "LICENSE"))
     with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        for source in source_files(browser):
-            relative = source.relative_to(browser_dir).as_posix()
+        for relative, source in sorted(members):
             info = zipfile.ZipInfo(relative, FIXED_TIMESTAMP)
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
