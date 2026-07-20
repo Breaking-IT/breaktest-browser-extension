@@ -6,6 +6,8 @@
  * See the LICENSE file at the root of this distribution.
  */
 
+import "./har-export-store.js";
+
 const transactionName = document.querySelector("#transaction-name");
 const startUrl = document.querySelector("#start-url");
 const disableCache = document.querySelector("#disable-cache");
@@ -30,11 +32,21 @@ const pendingCount = document.querySelector("#pending-count");
 const errorCount = document.querySelector("#error-count");
 const transactionList = document.querySelector("#transaction-list");
 const requestList = document.querySelector("#request-list");
+const removeTransactionDialog = document.querySelector("#remove-transaction-dialog");
+const removeTransactionName = document.querySelector("#remove-transaction-name");
+const removeTransactionSummary = document.querySelector("#remove-transaction-summary");
+const removeTransactionRequests = document.querySelector("#remove-transaction-requests");
+const moveRequestsPrevious = document.querySelector("#move-requests-previous");
+const moveRequestsNext = document.querySelector("#move-requests-next");
+const previousTransactionName = document.querySelector("#previous-transaction-name");
+const nextTransactionName = document.querySelector("#next-transaction-name");
+const cancelTransactionRemoval = document.querySelector("#cancel-transaction-removal");
 
 let active = false;
 let busy = false;
 let errors = 0;
-let pendingHar = null;
+let pendingExport = null;
+let currentTransactionId = null;
 let lastCommittedTransactionName = transactionName.value.trim();
 let transactionNameDirty = false;
 let lastTransactionInputAt = 0;
@@ -44,7 +56,7 @@ const TRANSACTION_TYPING_SETTLE_MS = 250;
 const INCOGNITO_LAUNCH_KEY = "pendingIncognitoLaunch";
 const INCOGNITO_LAUNCH_TTL_MS = 60_000;
 const RECORDING_CONSENT_KEY = "recordingDisclosureAcceptedVersion";
-const RECORDING_DISCLOSURE_VERSION = 1;
+const RECORDING_DISCLOSURE_VERSION = 2;
 const DEFAULT_TRANSACTION_NAME = "01_OpenHomepage";
 let recordingConsentAccepted = false;
 const inIncognitoContext = chrome.extension.inIncognitoContext;
@@ -83,7 +95,10 @@ chrome.runtime.onMessage.addListener(message => {
       applyStatus(message.status);
       break;
     case "transaction-started":
-      renderTransactions();
+      message.status ? applyStatus(message.status) : renderTransactions();
+      break;
+    case "transactions-changed":
+      applyTransactionChanges(message.status);
       break;
     case "recording-started":
       applyStatus(message);
@@ -121,6 +136,29 @@ async function initialize() {
   await restoreRecordingConsent();
   await removeExpiredIncognitoLaunch();
   await restoreStatus();
+  await restorePendingExport();
+}
+
+async function restorePendingExport() {
+  try {
+    await globalThis.HarExportStore.cleanupStale();
+    if (active) {
+      return;
+    }
+    pendingExport = await globalThis.HarExportStore.latest();
+    if (!pendingExport) {
+      return;
+    }
+    applyStatus({
+      active: false,
+      requestCount: pendingExport.entryCount,
+      pendingCount: 0
+    });
+    updateRecordingControls();
+    setStatus("A completed HAR is waiting to be saved.");
+  } catch (error) {
+    showError(`Unable to restore a pending HAR export: ${error.message}`);
+  }
 }
 
 async function removeExpiredIncognitoLaunch() {
@@ -228,9 +266,7 @@ async function restoreStatus() {
     errorCount.textContent = "0";
   }
   if (response.summaries) {
-    for (const summary of response.summaries) {
-      appendRequest(summary, false);
-    }
+    renderRequestSummaries(response.summaries);
   }
 }
 
@@ -339,25 +375,26 @@ function commitPendingTransaction() {
 
 async function finishRecording() {
   setBusy(true);
-  setStatus(pendingHar
+  setStatus(pendingExport
     ? "Choose where to save the completed HAR…"
     : "Finishing pending requests and building HAR…");
   try {
-    if (!pendingHar) {
+    if (!pendingExport) {
       await commitPendingTransaction();
       const response = await send({type: "stop-recording"});
       if (!response.ok) {
         throw new Error(response.error);
       }
-      pendingHar = response.har;
-      applyStatus({active: false, requestCount: pendingHar.log.entries.length, pendingCount: 0});
+      pendingExport = response.export;
+      applyStatus({active: false, requestCount: pendingExport.entryCount, pendingCount: 0});
     }
-    await downloadHar(pendingHar);
-    pendingHar = null;
+    await downloadHar(pendingExport);
+    await globalThis.HarExportStore.remove(pendingExport.id);
+    pendingExport = null;
     updateRecordingControls();
     setStatus("HAR saved. Import it with File → Import HAR… in BreakTest.");
   } catch (error) {
-    showError(pendingHar
+    showError(pendingExport
       ? `HAR was not saved: ${error.message}. Choose Save HAR to retry or Discard and start over.`
       : error.message);
   } finally {
@@ -367,7 +404,7 @@ async function finishRecording() {
 }
 
 async function discardAndStartOver() {
-  const discardingHar = Boolean(pendingHar);
+  const discardingHar = Boolean(pendingExport);
   const confirmed = window.confirm(discardingHar
     ? "Discard the unsaved HAR and start over? This recording cannot be recovered."
     : "Cancel this recording and discard all captured requests?");
@@ -382,7 +419,10 @@ async function discardAndStartOver() {
         throw new Error(response.error);
       }
     }
-    pendingHar = null;
+    if (pendingExport) {
+      await globalThis.HarExportStore.remove(pendingExport.id);
+    }
+    pendingExport = null;
     resetRecordingView();
     setStatus("Recording discarded. Ready to start again.");
   } catch (error) {
@@ -405,18 +445,16 @@ function resetRecordingView() {
   updateRecordingControls();
 }
 
-async function downloadHar(har) {
-  const json = JSON.stringify(har, null, 2);
-  // Keep the explicit .har filename authoritative in the browser's Save As
-  // dialog. application/json can cause some platforms to replace or append
-  // the extension with .json even though HAR content is JSON.
-  const blob = new Blob([json], {type: "application/octet-stream"});
-  const url = URL.createObjectURL(blob);
-  const stamp = new Date().toISOString().replaceAll(":", "-").replace(/\.\d{3}Z$/, "Z");
+async function downloadHar(exportDescriptor) {
+  const storedExport = await globalThis.HarExportStore.get(exportDescriptor.id);
+  if (!storedExport?.blob) {
+    throw new Error("The completed HAR is no longer available in local storage");
+  }
+  const url = URL.createObjectURL(storedExport.blob);
   try {
     const downloadId = await chrome.downloads.download({
       url,
-      filename: `breaktest-recording-${stamp}.har`,
+      filename: storedExport.filename,
       saveAs: true
     });
     await waitForDownload(downloadId);
@@ -457,6 +495,7 @@ function waitForDownload(downloadId) {
 
 function applyStatus(status) {
   setActive(Boolean(status.active));
+  currentTransactionId = status.currentTransaction?.id || null;
   indicator.classList.toggle("active", Boolean(status.active && status.attached !== false));
   indicator.classList.toggle("reconnecting", Boolean(status.reconnecting));
   requestCount.textContent = String(status.requestCount ?? 0);
@@ -499,7 +538,7 @@ function setBusy(isBusy) {
 
 function updateRecordingControls() {
   const hasRecording = active;
-  const hasUnsavedHar = Boolean(pendingHar);
+  const hasUnsavedHar = Boolean(pendingExport);
   stopButton.textContent = hasUnsavedHar ? "Save HAR" : "Finish and export";
   stopButton.hidden = !hasRecording && !hasUnsavedHar;
   stopButton.disabled = busy || (!hasRecording && !hasUnsavedHar);
@@ -519,7 +558,7 @@ function requireRecordingConsent() {
 }
 
 function updateStartControls() {
-  const disabled = busy || active || Boolean(pendingHar) || !recordingConsentAccepted;
+  const disabled = busy || active || Boolean(pendingExport) || !recordingConsentAccepted;
   startButton.disabled = disabled;
   blankStartButton.disabled = disabled;
   incognitoStartButton.disabled = disabled;
@@ -577,11 +616,48 @@ function collapsePrivacySettings() {
 function renderTransactions(transactions) {
   if (transactions) {
     transactionList.replaceChildren();
-    for (const transaction of transactions) {
+    transactions.forEach((transaction, index) => {
       const item = document.createElement("li");
-      item.textContent = `${transaction.name} (${transaction.requestCount ?? 0})`;
+      const row = document.createElement("div");
+      row.className = "transaction-row";
+
+      const label = document.createElement("span");
+      label.className = "transaction-name";
+      label.textContent = `${transaction.name} (${transaction.requestCount ?? 0})`;
+      label.title = transaction.name;
+
+      const actions = document.createElement("span");
+      actions.className = "transaction-actions";
+      const editButton = document.createElement("button");
+      editButton.type = "button";
+      editButton.className = "quiet transaction-action";
+      editButton.textContent = "✎";
+      editButton.title = `Rename ${transaction.name}`;
+      editButton.setAttribute("aria-label", `Rename transaction ${transaction.name}`);
+      editButton.disabled = !active;
+      editButton.addEventListener("click", () => renameRecordedTransaction(transaction));
+
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.className = "quiet transaction-action transaction-delete";
+      deleteButton.textContent = "×";
+      deleteButton.setAttribute("aria-label", `Remove transaction ${transaction.name}`);
+      const isCurrent = transaction.id === currentTransactionId;
+      deleteButton.disabled = !active || isCurrent;
+      deleteButton.title = isCurrent
+        ? "Start a new transaction before removing the active transaction"
+        : `Remove ${transaction.name} and its recorded requests`;
+      deleteButton.addEventListener("click", () => deleteRecordedTransaction(
+        transaction,
+        transactions[index - 1] || null,
+        transactions[index + 1] || null
+      ));
+
+      actions.append(editButton, deleteButton);
+      row.append(label, actions);
+      item.append(row);
       transactionList.append(item);
-    }
+    });
   } else {
     send({type: "recorder-status"}).then(response => {
       if (response.ok) {
@@ -591,9 +667,102 @@ function renderTransactions(transactions) {
   }
 }
 
+async function renameRecordedTransaction(transaction) {
+  const name = window.prompt("Rename transaction", transaction.name);
+  if (name == null || name.trim() === transaction.name) {
+    return;
+  }
+  const response = await send({type: "rename-transaction", id: transaction.id, name});
+  if (!response.ok) {
+    showError(response.error);
+    return;
+  }
+  applyTransactionChanges(response.status);
+  setStatus(`Transaction renamed to ${response.transaction.name}.`);
+}
+
+async function deleteRecordedTransaction(transaction, previousTransaction, nextTransaction) {
+  const requestDisposition = await chooseTransactionRemoval(
+    transaction,
+    previousTransaction,
+    nextTransaction
+  );
+  if (!requestDisposition) {
+    return;
+  }
+  const response = await send({
+    type: "delete-transaction",
+    id: transaction.id,
+    requestDisposition
+  });
+  if (!response.ok) {
+    showError(response.error);
+    return;
+  }
+  applyTransactionChanges(response.status);
+  setStatus(response.targetTransaction
+    ? `Removed transaction ${transaction.name} and moved its requests to ${response.targetTransaction.name}.`
+    : `Removed transaction ${transaction.name} and its recorded requests.`);
+}
+
+function chooseTransactionRemoval(transaction, previousTransaction, nextTransaction) {
+  const requestCountValue = transaction.requestCount ?? 0;
+  const requestLabel = requestCountValue === 1 ? "recorded request" : "recorded requests";
+  removeTransactionName.textContent = `“${transaction.name}”`;
+  removeTransactionSummary.textContent = `${requestCountValue} ${requestLabel}`;
+  moveRequestsPrevious.disabled = !previousTransaction;
+  previousTransactionName.textContent = previousTransaction
+    ? `Move to “${previousTransaction.name}”.`
+    : "No previous transaction is available.";
+  moveRequestsNext.disabled = !nextTransaction;
+  nextTransactionName.textContent = nextTransaction
+    ? `Move to “${nextTransaction.name}”.`
+    : "No next transaction is available.";
+
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = choice => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      removeTransactionDialog.close();
+      resolve(choice);
+    };
+    removeTransactionRequests.onclick = () => finish("delete");
+    moveRequestsPrevious.onclick = () => finish("previous");
+    moveRequestsNext.onclick = () => finish("next");
+    cancelTransactionRemoval.onclick = () => finish(null);
+    removeTransactionDialog.oncancel = event => {
+      event.preventDefault();
+      finish(null);
+    };
+    removeTransactionDialog.showModal();
+    cancelTransactionRemoval.focus();
+  });
+}
+
+function applyTransactionChanges(status) {
+  if (!status) {
+    return;
+  }
+  applyStatus(status);
+  renderRequestSummaries(status.summaries || []);
+}
+
+function renderRequestSummaries(summaries) {
+  requestList.replaceChildren();
+  errors = 0;
+  errorCount.textContent = "0";
+  for (const summary of summaries) {
+    appendRequest(summary);
+  }
+}
+
 function appendRequest(summary, updateErrors = true) {
   const row = document.createElement("article");
   row.className = `request ${summary.failed || summary.status >= 400 ? "failed" : ""}`;
+  row.dataset.transactionId = summary.transactionId;
 
   const status = document.createElement("span");
   status.className = "request-status";

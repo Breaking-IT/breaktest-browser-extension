@@ -6,6 +6,8 @@
  * See the LICENSE file at the root of this distribution.
  */
 
+importScripts("har-export-store.js");
+
 const PROTOCOL_VERSION = "1.3";
 const MAX_BODY_CHARS = 2 * 1024 * 1024;
 const NETWORK_TOTAL_BUFFER_BYTES = 48 * 1024 * 1024;
@@ -13,7 +15,7 @@ const NETWORK_RESOURCE_BUFFER_BYTES = 24 * 1024 * 1024;
 const MAX_VISIBLE_REQUESTS = 1000;
 const SIDE_PANEL_PATH = "sidepanel.html";
 const INCOGNITO_LAUNCH_KEY = "pendingIncognitoLaunch";
-const RECORDING_DISCLOSURE_VERSION = 1;
+const RECORDING_DISCLOSURE_VERSION = 2;
 
 let recording = null;
 
@@ -23,6 +25,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onStartup.addListener(() => {
   configureExistingTabPanels().catch(error => console.error(error));
+  globalThis.HarExportStore.cleanupStale().catch(error => console.error(error));
 });
 
 chrome.tabs.onCreated.addListener(tab => {
@@ -38,6 +41,7 @@ chrome.sidePanel
   .catch(error => console.error(error));
 
 configureExistingTabPanels().catch(error => console.error(error));
+globalThis.HarExportStore.cleanupStale().catch(error => console.error(error));
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   handleMessage(message)
@@ -82,6 +86,10 @@ async function handleMessage(message) {
       return startIncognitoRecording(message);
     case "new-transaction":
       return startTransaction(message.name);
+    case "rename-transaction":
+      return renameTransaction(message.id, message.name);
+    case "delete-transaction":
+      return deleteTransaction(message.id, message.requestDisposition);
     case "stop-recording":
       return stopRecording();
     case "cancel-recording":
@@ -192,6 +200,7 @@ async function startRecording(message) {
     reconnecting: false,
     detachReason: null,
     capturedBodyChars: 0,
+    nextTransactionOrdinal: 1,
     nextEntryOrdinal: 0
   };
   startTransactionInternal(transactionName);
@@ -318,8 +327,9 @@ async function startTransaction(name) {
     return {ok: true, transaction: recording.currentTransaction, status: recorderStatus()};
   }
   const transaction = startTransactionInternal(normalizedName);
-  notify("transaction-started", {transaction});
-  return {ok: true, transaction, status: recorderStatus()};
+  const status = recorderStatus();
+  notify("transaction-started", {transaction, status});
+  return {ok: true, transaction, status};
 }
 
 function startTransactionInternal(name) {
@@ -327,15 +337,118 @@ function startTransactionInternal(name) {
   if (!normalizedName) {
     throw new Error("Enter a transaction name");
   }
+  const transactionOrdinal = recording.nextTransactionOrdinal++;
   const transaction = {
-    id: `transaction-${recording.transactions.length + 1}`,
+    id: `transaction-${transactionOrdinal}`,
     name: normalizedName,
     startedDateTime: new Date().toISOString(),
-    order: recording.transactions.length + 1,
+    order: transactionOrdinal,
     requestCount: 0
   };
   recording.transactions.push(transaction);
   recording.currentTransaction = transaction;
+  return transaction;
+}
+
+function renameTransaction(id, name) {
+  const transaction = editableTransaction(id);
+  const normalizedName = String(name || "").trim();
+  if (!normalizedName) {
+    throw new Error("Enter a transaction name");
+  }
+  if (normalizedName.length > 120) {
+    throw new Error("Transaction names can contain at most 120 characters");
+  }
+  transaction.name = normalizedName;
+  for (const state of recording.activeRequests.values()) {
+    if (state.transaction.id === id) {
+      state.transaction.name = normalizedName;
+    }
+  }
+  for (const entry of recording.entries) {
+    if (entry._breaktest.transactionId === id) {
+      entry._breaktest.transactionName = normalizedName;
+    }
+  }
+  for (const summary of recording.summaries) {
+    if (summary.transactionId === id) {
+      summary.transactionName = normalizedName;
+    }
+  }
+  const status = recorderStatus();
+  notify("transactions-changed", {status});
+  return {ok: true, transaction, status};
+}
+
+function deleteTransaction(id, requestDisposition = "delete") {
+  const transaction = editableTransaction(id);
+  if (recording.currentTransaction.id === id) {
+    throw new Error("Start a new transaction before removing the active transaction");
+  }
+  if (!["delete", "previous", "next"].includes(requestDisposition)) {
+    throw new Error("Choose what to do with the recorded requests");
+  }
+
+  const transactionIndex = recording.transactions.findIndex(item => item.id === id);
+  const targetTransaction = requestDisposition === "previous"
+    ? recording.transactions[transactionIndex - 1]
+    : requestDisposition === "next"
+      ? recording.transactions[transactionIndex + 1]
+      : null;
+  if (requestDisposition !== "delete" && !targetTransaction) {
+    throw new Error(`There is no ${requestDisposition} transaction`);
+  }
+
+  recording.transactions = recording.transactions.filter(item => item.id !== id);
+  if (targetTransaction) {
+    targetTransaction.requestCount += transaction.requestCount;
+    for (const state of recording.activeRequests.values()) {
+      if (state.transaction.id === id) {
+        state.transaction = targetTransaction;
+      }
+    }
+    for (const entry of recording.entries) {
+      if (entry._breaktest.transactionId === id) {
+        entry._breaktest.transactionId = targetTransaction.id;
+        entry._breaktest.transactionName = targetTransaction.name;
+        entry._breaktest.transactionOrder = targetTransaction.order;
+      }
+    }
+    for (const summary of recording.summaries) {
+      if (summary.transactionId === id) {
+        summary.transactionId = targetTransaction.id;
+        summary.transactionName = targetTransaction.name;
+      }
+    }
+  } else {
+    recording.entries = recording.entries.filter(entry => entry._breaktest.transactionId !== id);
+    recording.summaries = recording.summaries.filter(summary => summary.transactionId !== id);
+    for (const [key, state] of recording.activeRequests) {
+      if (state.transaction.id === id) {
+        state.discarded = true;
+        state.finalized = true;
+        recording.activeRequests.delete(key);
+      }
+    }
+  }
+  recording.capturedBodyChars = recording.entries.reduce(
+    (total, entry) => total + (entry.response.content.text?.length || 0),
+    0
+  );
+
+  const status = recorderStatus();
+  notify("transactions-changed", {status});
+  return {ok: true, transaction, targetTransaction, requestDisposition, status};
+}
+
+function editableTransaction(id) {
+  if (!recording || recording.stopping) {
+    throw new Error("No recording is active");
+  }
+  const transaction = recording.transactions.find(item => item.id === id);
+  if (!transaction) {
+    throw new Error("The selected transaction no longer exists");
+  }
   return transaction;
 }
 
@@ -363,10 +476,11 @@ async function stopRecording() {
   setRecordingBadge(false);
 
   const har = buildHar(recording);
+  const exportDescriptor = await globalThis.HarExportStore.save(har);
   const status = recorderStatus();
   recording = null;
   notify("recording-stopped", status);
-  return {ok: true, har, status};
+  return {ok: true, export: exportDescriptor, status};
 }
 
 async function cancelRecording() {
@@ -660,6 +774,9 @@ function applyResponse(state, response, timestamp) {
 }
 
 function captureBody(state, result) {
+  if (state.discarded || state.finalized) {
+    return;
+  }
   if (!result || typeof result.body !== "string") {
     state.bodyUnavailable = true;
     state.bodyUnavailableReason = "Chrome returned no response body";
@@ -681,7 +798,7 @@ function captureBody(state, result) {
 }
 
 function finalizeRequest(state, finishedTimestamp) {
-  if (state.finalized) {
+  if (state.finalized || state.discarded) {
     return;
   }
   state.finalized = true;

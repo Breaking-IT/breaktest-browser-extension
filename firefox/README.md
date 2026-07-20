@@ -56,6 +56,13 @@ then move the pointer toward the action that should start that transaction. The
 name is committed after typing stops; requests already in progress keep their
 original transaction.
 
+Use the edit icon in the Transactions list to rename a transaction and update
+all requests already assigned to it. Use the × button to remove an earlier
+transaction, then choose whether to remove its captured and pending requests or
+add them to the previous or next transaction. Choices without an available
+neighboring transaction are disabled. The active transaction cannot be removed;
+start the next transaction first, then remove the earlier one.
+
 Choose **Finish and export** to download the HAR. In BreakTest, use
 **File > Import HAR...** and select that file. BreakTest turns the recorded
 names into Transaction Controllers.
@@ -64,6 +71,12 @@ Firefox opens its native Save As dialog so you can change the suggested HAR
 filename and select a folder. Firefox sidebars are window-wide, so the recorder
 remains visible when you switch tabs in the same window. This differs from the
 tab-specific recorder panel in Chrome and Edge.
+
+The completed HAR is staged as a browser-local IndexedDB Blob before the Save
+As dialog opens. If saving is cancelled or interrupted, choose **Save HAR** to
+retry. The pending export survives closing and reopening the sidebar. It is
+removed after a successful download, explicit discard, or the next cleanup
+after it becomes 24 hours old.
 
 ## Private-window recording
 
@@ -87,6 +100,9 @@ until the last private window closes.
   response bodies on 3xx requests.
 - Keeps requests whose bodies Firefox cannot expose and marks them as
   unavailable in `_breaktest` metadata and the live list.
+- Stages completed HARs in browser-local IndexedDB, allowing exports larger
+  than extension-message transport limits. Available browser storage and
+  memory bound the practical recording size.
 - Exports locally and does not upload recordings to a BreakTest service.
 - Does not convert individual WebSocket frames into JMeter samplers.
 

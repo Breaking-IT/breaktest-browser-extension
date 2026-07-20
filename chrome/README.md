@@ -90,6 +90,12 @@ with the previous transaction. Responses that finish later remain assigned to
 the transaction in which their request started.
 
 The Transactions list displays the number of requests assigned to each name.
+Use the edit icon beside a transaction to rename it and update all requests
+already assigned to it. Use the × button to remove an earlier transaction, then
+choose whether to remove its captured and pending requests or add them to the
+previous or next transaction. Choices without an available neighboring
+transaction are disabled. The active transaction cannot be removed; start the
+next transaction first, then remove the earlier one.
 The Live requests list shows each completed request as status, method, and
 path. A warning marker means Chrome could not return the complete response
 body.
@@ -105,6 +111,13 @@ body.
 
 BreakTest uses the recorded names instead of guessing transaction boundaries
 from timing gaps.
+
+The completed HAR is staged as a browser-local IndexedDB Blob instead of being
+sent through extension messaging, so the 64 MiB extension-message limit does
+not limit the exported HAR size. If saving is cancelled or interrupted, choose
+**Save HAR** to retry. The pending export survives closing and reopening the
+recorder panel. It is removed after a successful download, explicit discard,
+or the next cleanup after it becomes 24 hours old.
 
 ## Record in a private browser session
 
@@ -203,6 +216,9 @@ does not reload extension source files.
   identifier for the next hop.
   Bodies Chrome still cannot expose are marked as unavailable in `_breaktest`
   metadata and in the live request list rather than silently appearing empty.
+- Stages completed HARs in browser-local IndexedDB before export, avoiding
+  extension-message size limits. Available browser storage and memory, rather
+  than Chrome's 64 MiB message limit, bound the practical recording size.
 - Exports a HAR locally; it does not yet stream to a running BreakTest process.
 - WebSocket handshakes may appear as HTTP requests, but individual WebSocket
   frames are not converted into JMeter samplers.

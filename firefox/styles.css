@@ -77,6 +77,21 @@ button.quiet { border: 0; padding: 3px 5px; color: var(--muted); font-size: 11px
 .transaction-card { display: grid; gap: 8px; }
 #transaction-list { margin: 0; padding-left: 24px; font-size: 12px; }
 #transaction-list li { padding: 3px 0; }
+.transaction-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.transaction-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transaction-actions { display: inline-flex; flex: none; gap: 2px; }
+button.transaction-action { width: 24px; height: 24px; padding: 0; font-size: 15px; line-height: 1; }
+button.transaction-delete { color: var(--danger); font-size: 18px; }
+button.transaction-action:disabled { cursor: not-allowed; opacity: .35; }
+.transaction-dialog { width: min(360px, calc(100vw - 20px)); padding: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); }
+.transaction-dialog::backdrop { background: rgb(0 0 0 / 45%); }
+.transaction-dialog-content { display: grid; gap: 12px; padding: 14px; }
+.transaction-dialog-content > p { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.transaction-remove-options { display: grid; gap: 8px; }
+.transaction-remove-options button { display: grid; gap: 3px; text-align: left; }
+.transaction-remove-options button strong { font-size: 12px; }
+.transaction-remove-options button span { color: var(--muted); font-size: 11px; line-height: 1.35; }
+.transaction-dialog-cancel { justify-self: end; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .request-list { display: grid; gap: 4px; max-height: 50vh; overflow: auto; }
 .request { display: grid; grid-template-columns: 34px 42px minmax(0, 1fr) auto; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 6px; padding: 5px 7px; min-width: 0; font-size: 11px; }

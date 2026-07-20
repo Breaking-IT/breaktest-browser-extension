@@ -65,7 +65,9 @@ file with named BreakTest transactions.
   the recorder was opened or the new tab created for recording.
 - `storage`: Remembers the accepted disclosure version and temporarily
   coordinates an explicitly requested incognito launch. Launch instructions
-  expire after 60 seconds; recorded HAR content is not stored there.
+  expire after 60 seconds. Separately, the extension stages a completed HAR in
+  browser-local IndexedDB until its download succeeds, the user discards it,
+  or cleanup runs after it becomes 24 hours old.
 - `tabs`: Creates or selects the recording tab, reads the selected tab's URL
   and title, navigates to the user-supplied Start URL, and replaces the
   temporary private-window launcher page with the recorded site.
@@ -104,6 +106,8 @@ in its listing, in-product disclosure, and privacy policy.
 Firefox's `downloads` permission is used only to open the native Save As dialog
 for a user-requested HAR export. Firefox sidebars are window-wide by browser
 design, so the recorder remains visible across tabs in the same window.
+Completed HARs are staged temporarily in browser-local IndexedDB under the
+same deletion rules described for Chromium.
 
 ## Graphic assets
 
