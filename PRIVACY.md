@@ -1,6 +1,6 @@
 # BreakTest Browser Recorder Privacy Policy
 
-Effective date: July 14, 2026
+Effective date: July 20, 2026
 
 This policy describes how the BreakTest Browser Recorder extensions for
 Chrome, Microsoft Edge, and Firefox process information.
@@ -44,10 +44,19 @@ secondary purpose.
 
 ## Storage and retention
 
-Active recording data is kept in extension memory until you export or end the
-recording, close the recorded tab, reload or remove the extension, or the
+Active recording data is kept in extension memory until you finish or discard
+the recording, close the recorded tab, reload or remove the extension, or the
 browser terminates the extension process. The recorder retains at most 2 MiB
 of body text for each response and marks larger bodies as truncated.
+
+When you finish a recording, the extension serializes the completed HAR into a
+Blob in browser-local IndexedDB before opening the Save As dialog. This avoids
+browser extension-message size limits and lets the recorder offer the same
+completed HAR again if the dialog or download fails or the recorder panel is
+closed. The locally stored Blob is deleted after a successful download or when
+you explicitly discard it. An abandoned Blob is deleted the next time cleanup
+runs after it becomes 24 hours old. Removing the extension also removes its
+IndexedDB data.
 
 For private or incognito launch coordination, the extension temporarily stores
 the Start URL, transaction name, cache preference, consent version, and window
@@ -62,8 +71,9 @@ every recording. You can review the notice or clear your consent through
 data practices increments the notice version and requires consent again.
 
 When you export a recording, the browser opens its native Save As dialog and
-writes the HAR to the filename and folder you choose. The extension does not
-manage or delete exported files.
+writes the HAR to the filename and folder you choose. The extension deletes
+its temporary IndexedDB copy after the download succeeds, but it does not
+manage or delete the exported file.
 
 ## Transmission and sharing
 

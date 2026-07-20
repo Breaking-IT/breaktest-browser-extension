@@ -37,13 +37,17 @@ required.
   Breaking IT or a third party.
 - The package contains no analytics, advertising, telemetry, remote scripts,
   dynamic code execution, or native messaging.
-- Recorded content is held in extension memory. Only the accepted disclosure
-  version, short-lived private-window launch metadata, and Firefox
-  cache-restoration state use local extension storage.
+- Active recorded content is held in extension memory. When recording stops,
+  the completed HAR is staged as a browser-local IndexedDB Blob so large files
+  do not cross extension-message limits and an interrupted save can be retried.
+  It is removed after a successful download, explicit discard, or cleanup once
+  it is more than 24 hours old. The accepted disclosure version, short-lived
+  private-window launch metadata, and Firefox cache-restoration state also use
+  local extension storage.
 - Export is initiated by the user and opens the browser's native Save As dialog
   through the `downloads` API. Cancelling keeps the completed HAR available in
-  the open recorder so **Save HAR** can retry, or **Discard and start over**
-  can explicitly delete it.
+  the recorder across panel reopenings so **Save HAR** can retry, or **Discard
+  and start over** can explicitly delete it.
 
 ## Chromium-specific review notes
 
@@ -77,6 +81,7 @@ no separate source-code archive is required.
   browser cache while recording**; the previous setting is restored afterward.
 - `downloads` opens the native Save As dialog only after **Finish and export**.
 - `storage` holds the accepted disclosure version, short-lived private launch
-  coordination, and cache restore state.
+  coordination, and cache restore state. Browser-local IndexedDB temporarily
+  stages completed HAR exports for download and retry.
 - Firefox sidebars are window-wide by browser design and therefore remain
   visible across tabs in the same window.

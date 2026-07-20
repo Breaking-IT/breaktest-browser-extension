@@ -162,6 +162,8 @@ def validate() -> list[str]:
             errors.append(f"{browser}: recorder UI does not link to the public privacy policy")
         if "recording-consent" not in panel:
             errors.append(f"{browser}: recorder UI does not contain recording consent")
+        if "cleaned up after 24 hours" not in panel:
+            errors.append(f"{browser}: recorder UI does not disclose pending HAR retention")
         for button_id in ("start-button", "blank-start-button"):
             if not re.search(rf'<button\s+[^>]*id="{button_id}"[^>]*\bdisabled\b', panel):
                 errors.append(f"{browser}: {button_id} must be disabled before consent")
@@ -169,6 +171,8 @@ def validate() -> list[str]:
             errors.append(f"{browser}: recorder start actions do not enforce consent")
         if 'RECORDING_CONSENT_KEY = "recordingDisclosureAcceptedVersion"' not in panel_script:
             errors.append(f"{browser}: accepted disclosure version is not stored")
+        if "RECORDING_DISCLOSURE_VERSION = 2" not in panel_script:
+            errors.append(f"{browser}: recording disclosure version must cover IndexedDB export retention")
         if "function showPrivacySettings()" not in panel_script or "privacy-settings-button" not in panel:
             errors.append(f"{browser}: saved consent cannot be reviewed from the recorder")
         if "consentVersion: RECORDING_DISCLOSURE_VERSION" not in panel_script:
@@ -184,6 +188,43 @@ def validate() -> list[str]:
         background_source = (ROOT / browser / background_file).read_text(encoding="utf-8")
         if 'case "cancel-recording"' not in background_source:
             errors.append(f"{browser}: the background recorder cannot cancel an active recording")
+        for command in ("rename-transaction", "delete-transaction"):
+            if f'case "{command}"' not in background_source:
+                errors.append(f"{browser}: background recorder does not support {command}")
+            if f'type: "{command}"' not in panel_script:
+                errors.append(f"{browser}: recorder UI does not send {command}")
+        if "nextTransactionOrdinal" not in background_source:
+            errors.append(f"{browser}: transaction IDs can collide after deletion")
+        if "entry._breaktest.transactionName = normalizedName" not in background_source:
+            errors.append(f"{browser}: transaction rename does not update captured HAR entries")
+        if "entry._breaktest.transactionId !== id" not in background_source:
+            errors.append(f"{browser}: transaction deletion does not remove captured HAR entries")
+        if 'requestDisposition === "previous"' not in background_source:
+            errors.append(f"{browser}: transaction requests cannot be moved to the previous transaction")
+        if 'requestDisposition === "next"' not in background_source:
+            errors.append(f"{browser}: transaction requests cannot be moved to the next transaction")
+        if "entry._breaktest.transactionId = targetTransaction.id" not in background_source:
+            errors.append(f"{browser}: moved transaction requests do not update captured HAR entries")
+        if "state.transaction = targetTransaction" not in background_source:
+            errors.append(f"{browser}: in-flight requests are not moved with their transaction")
+        if 'textContent = "✎"' not in panel_script or 'textContent = "×"' not in panel_script:
+            errors.append(f"{browser}: transaction edit and delete controls are missing")
+        if "chooseTransactionRemoval" not in panel_script or "requestDisposition" not in panel_script:
+            errors.append(f"{browser}: transaction removal choices are missing from the recorder UI")
+        if 'id="move-requests-previous"' not in panel or 'id="move-requests-next"' not in panel:
+            errors.append(f"{browser}: previous and next transaction choices are missing from the dialog")
+        if "HarExportStore.save(har)" not in background_source:
+            errors.append(f"{browser}: completed HARs are not staged outside extension messaging")
+        if "return {ok: true, har" in background_source:
+            errors.append(f"{browser}: completed HARs must not cross the extension message boundary")
+        if "HarExportStore.get(exportDescriptor.id)" not in panel_script:
+            errors.append(f"{browser}: recorder UI cannot load a staged HAR export")
+        if "HarExportStore.remove(pendingExport.id)" not in panel_script:
+            errors.append(f"{browser}: staged HAR exports are not removed after use or discard")
+        if "response.har" in panel_script or "pendingHar" in panel_script:
+            errors.append(f"{browser}: recorder UI still expects a monolithic HAR message")
+        if not (browser_dir / "har-export-store.js").is_file():
+            errors.append(f"{browser}: IndexedDB HAR export helper is missing")
 
     chrome_worker = (ROOT / "chrome" / "service-worker.js").read_text(encoding="utf-8")
     if "openPanelOnActionClick: true" not in chrome_worker:
@@ -194,13 +235,21 @@ def validate() -> list[str]:
         errors.append("chrome: incognito launcher tab is not reused for recording")
     if 'case "start-incognito-recording"' not in chrome_worker:
         errors.append("chrome: incognito launcher cannot start recording directly")
+    if 'importScripts("har-export-store.js")' not in chrome_worker:
+        errors.append("chrome: service worker does not load IndexedDB HAR export support")
     if "preparedNewTab" not in chrome_worker:
         errors.append("chrome: extension-created new tabs are not distinguished from internal pages")
     if manifests["chrome"].get("side_panel"):
         errors.append("chrome: a manifest-level side panel would make the recorder global")
 
+    firefox_background_scripts = manifests["firefox"].get("background", {}).get("scripts", [])
+    if firefox_background_scripts[:2] != ["har-export-store.js", "background.js"]:
+        errors.append("firefox: IndexedDB HAR export support must load before the recorder background")
+
     if not (ROOT / "PRIVACY.md").is_file():
         errors.append("PRIVACY.md is missing")
+    elif "browser-local IndexedDB" not in (ROOT / "PRIVACY.md").read_text(encoding="utf-8"):
+        errors.append("PRIVACY.md does not disclose staged HAR export retention")
     return errors
 
 

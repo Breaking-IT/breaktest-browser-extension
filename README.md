@@ -26,6 +26,11 @@ Chrome and Chromium-based Edge use the same files from `chrome/`. Firefox has
 a separate implementation in `firefox/` because its capture APIs differ from
 Chromium's DevTools protocol.
 
+During a recording, transactions can be renamed from the Transactions list.
+When removing a transaction, its requests can be removed too or reassigned to
+the previous or next transaction. The active transaction remains protected
+until a newer transaction is started.
+
 ## Development
 
 Keep the versions in both manifests aligned when releasing a recorder update.
@@ -59,6 +64,11 @@ The recorder processes and exports data locally. It does not upload recordings
 to a BreakTest service. The recording-data consent is remembered locally and
 can be reviewed or revoked from **Privacy & settings** in the recorder. See the
 full [privacy policy](PRIVACY.md).
+
+Completed HARs are staged in browser-local IndexedDB so large exports do not
+cross extension-message size limits. A staged export is removed after a
+successful download or explicit discard; abandoned exports are eligible for
+cleanup after 24 hours.
 
 Please report suspected vulnerabilities privately according to
 [SECURITY.md](SECURITY.md).

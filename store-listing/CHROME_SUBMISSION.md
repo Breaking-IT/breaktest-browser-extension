@@ -1,6 +1,6 @@
 # Chrome Web Store submission checklist
 
-Use this checklist for the initial `1.0.0` submission. Keep the answers aligned
+Use this checklist for the `1.1.0` submission. Keep the answers aligned
 with [LISTING.md](LISTING.md), [REVIEW_NOTES.md](REVIEW_NOTES.md), and the
 public [privacy policy](../PRIVACY.md).
 
@@ -21,7 +21,7 @@ python3 scripts/validate_extensions.py
 python3 scripts/package_extensions.py
 ```
 
-Upload `dist/breaktest-browser-recorder-chrome-edge-1.0.0.zip`. The generated
+Upload `dist/breaktest-browser-recorder-chrome-edge-1.1.0.zip`. The generated
 ZIP and checksums are release artifacts and are intentionally not committed.
 
 ## 3. Store listing
@@ -63,8 +63,10 @@ The 1400x560 marquee image and a promotional video are optional.
 - `sidePanel`: Displays the recorder controls, transaction list, and live
   request status for the selected recording tab.
 - `storage`: Remembers the accepted disclosure version and temporarily
-  coordinates an explicitly requested incognito launch. Recorded HAR content
-  is not stored there.
+  coordinates an explicitly requested incognito launch. Separately, a
+  completed HAR is staged in browser-local IndexedDB until its download
+  succeeds, the user discards it, or cleanup runs after it becomes 24 hours
+  old.
 - `tabs`: Creates or selects the recording tab, reads its URL and title,
   navigates to a user-supplied Start URL, and prepares the private-window
   launcher tab for recording.
