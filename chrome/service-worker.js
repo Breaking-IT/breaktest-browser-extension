@@ -194,6 +194,7 @@ async function startRecording(message) {
     currentTransaction: null,
     activeRequests: new Map(),
     requestSequences: new Map(),
+    requestChains: new Map(),
     entries: [],
     summaries: [],
     pendingTasks: new Set(),
@@ -461,6 +462,7 @@ async function stopRecording() {
 
   for (const state of recording.activeRequests.values()) {
     state.incomplete = true;
+    resolveUnknownExtraInfo(state);
     finalizeRequest(state, state.lastTimestamp || state.requestTimestamp);
   }
   recording.activeRequests.clear();
@@ -565,6 +567,10 @@ async function requestWillBeSent(source, params) {
   const previous = recording.activeRequests.get(key);
   if (params.redirectResponse && previous) {
     applyResponse(previous, params.redirectResponse, params.timestamp);
+    if (typeof params.redirectHasExtraInfo === "boolean") {
+      previous.hasExtraInfo = params.redirectHasExtraInfo;
+      reconcileExtraInfo(previous.chain);
+    }
     previous.redirect = true;
     recording.activeRequests.delete(key);
     const owner = recording;
@@ -614,6 +620,10 @@ async function requestWillBeSent(source, params) {
     failed: false,
     incomplete: false
   };
+  const chain = requestChain(key);
+  state.chain = chain;
+  chain.attempts.push(state);
+  reconcileExtraInfo(chain);
   const activeTransaction = recording.transactions.find(item => item.id === transaction.id);
   if (activeTransaction) {
     activeTransaction.requestCount++;
@@ -664,11 +674,78 @@ function responseMayHaveBody(state) {
   return contentLength > 0 || Boolean(headerValue(state.response.headers, "transfer-encoding"));
 }
 
-function requestExtraInfo(source, params) {
-  const state = recording.activeRequests.get(requestKey(source, params.requestId));
-  if (state && params.headers) {
-    state.request.headers = headersToHar(params.headers);
+function requestChain(key) {
+  let chain = recording.requestChains.get(key);
+  if (!chain) {
+    chain = {
+      attempts: [],
+      requestInfos: [],
+      responseInfos: [],
+      requestCursor: 0,
+      responseCursor: 0
+    };
+    recording.requestChains.set(key, chain);
   }
+  return chain;
+}
+
+function reconcileExtraInfo(chain) {
+  for (const state of chain.attempts) {
+    if (state.hasExtraInfo !== true) {
+      continue;
+    }
+    if (!state.requestExtraInfoApplied && chain.requestCursor < chain.requestInfos.length) {
+      const extraInfo = chain.requestInfos[chain.requestCursor];
+      chain.requestInfos[chain.requestCursor++] = null;
+      applyRequestExtraInfo(state, extraInfo);
+      state.requestExtraInfoApplied = true;
+    }
+    if (!state.responseExtraInfoApplied && chain.responseCursor < chain.responseInfos.length) {
+      const extraInfo = chain.responseInfos[chain.responseCursor];
+      chain.responseInfos[chain.responseCursor++] = null;
+      applyResponseExtraInfo(state, extraInfo);
+      state.responseExtraInfoApplied = true;
+    }
+  }
+}
+
+function resolveUnknownExtraInfo(state) {
+  if (typeof state.hasExtraInfo !== "boolean") {
+    state.hasExtraInfo = state.chain.requestCursor < state.chain.requestInfos.length
+      || state.chain.responseCursor < state.chain.responseInfos.length;
+  }
+  reconcileExtraInfo(state.chain);
+}
+
+function applyRequestExtraInfo(state, extraInfo) {
+  if (extraInfo.headers) {
+    state.request.headers = headersToHar(extraInfo.headers);
+    if (state.request.postData) {
+      state.request.postData = makePostData(state.request.postData.text, state.request.headers);
+    }
+  }
+  if (Array.isArray(extraInfo.associatedCookies)) {
+    state.request.cookies = associatedCookiesToHar(extraInfo.associatedCookies);
+  }
+}
+
+function applyResponseExtraInfo(state, extraInfo) {
+  if (extraInfo.headers) {
+    state.response.headers = headersToHar(extraInfo.headers);
+    state.response.content.mimeType = headerValue(state.response.headers, "content-type")
+      || state.response.content.mimeType;
+    state.response.redirectURL = headerValue(state.response.headers, "location")
+      || state.response.redirectURL;
+  }
+  if (Number.isInteger(extraInfo.statusCode)) {
+    state.response.status = extraInfo.statusCode;
+  }
+}
+
+function requestExtraInfo(source, params) {
+  const chain = requestChain(requestKey(source, params.requestId));
+  chain.requestInfos.push(params);
+  reconcileExtraInfo(chain);
 }
 
 function responseReceived(source, params) {
@@ -677,20 +754,17 @@ function responseReceived(source, params) {
     return;
   }
   applyResponse(state, params.response || {}, params.timestamp);
+  if (typeof params.hasExtraInfo === "boolean") {
+    state.hasExtraInfo = params.hasExtraInfo;
+    reconcileExtraInfo(state.chain);
+  }
   state.resourceType = params.type || state.resourceType;
 }
 
 function responseExtraInfo(source, params) {
-  const state = recording.activeRequests.get(requestKey(source, params.requestId));
-  if (!state) {
-    return;
-  }
-  if (params.headers) {
-    state.response.headers = headersToHar(params.headers);
-  }
-  if (Number.isInteger(params.statusCode)) {
-    state.response.status = params.statusCode;
-  }
+  const chain = requestChain(requestKey(source, params.requestId));
+  chain.responseInfos.push(params);
+  reconcileExtraInfo(chain);
 }
 
 async function loadingFinished(source, params) {
@@ -744,6 +818,7 @@ function loadingFailed(source, params) {
   state.failureText = params.errorText || "Request failed";
   state.canceled = Boolean(params.canceled);
   state.lastTimestamp = params.timestamp;
+  resolveUnknownExtraInfo(state);
   finalizeRequest(state, params.timestamp);
   recording.activeRequests.delete(key);
 }
@@ -754,7 +829,7 @@ function applyResponse(state, response, timestamp) {
   state.response = {
     status: response.status || 0,
     statusText: response.statusText || "",
-    httpVersion: response.protocol || "",
+    httpVersion: normalizeHttpVersion(response.protocol),
     headers: headersToHar(response.headers),
     cookies: [],
     content: {
@@ -766,6 +841,7 @@ function applyResponse(state, response, timestamp) {
     bodySize: Number.isFinite(response.encodedDataLength) ? response.encodedDataLength : -1,
     _transferSize: Number.isFinite(response.encodedDataLength) ? response.encodedDataLength : 0
   };
+  state.request.httpVersion = normalizeHttpVersion(response.protocol) || state.request.httpVersion;
   state.serverIPAddress = response.remoteIPAddress || "";
   state.connection = response.connectionId == null ? "" : String(response.connectionId);
   state.fromDiskCache = Boolean(response.fromDiskCache);
@@ -927,6 +1003,45 @@ function headersToHar(headers) {
     }
   }
   return result;
+}
+
+function associatedCookiesToHar(associatedCookies) {
+  return associatedCookies
+    .filter(item => item?.cookie && (!Array.isArray(item.blockedReasons) || item.blockedReasons.length === 0))
+    .map(item => {
+      const cookie = item.cookie;
+      const result = {
+        name: String(cookie.name || ""),
+        value: String(cookie.value || "")
+      };
+      if (cookie.path) {
+        result.path = cookie.path;
+      }
+      if (cookie.domain) {
+        result.domain = cookie.domain;
+      }
+      if (Number.isFinite(cookie.expires) && cookie.expires >= 0) {
+        result.expires = new Date(cookie.expires * 1000).toISOString();
+      }
+      if (typeof cookie.httpOnly === "boolean") {
+        result.httpOnly = cookie.httpOnly;
+      }
+      if (typeof cookie.secure === "boolean") {
+        result.secure = cookie.secure;
+      }
+      return result;
+    });
+}
+
+function normalizeHttpVersion(protocol) {
+  const normalized = String(protocol || "").toLowerCase();
+  if (normalized === "h2" || normalized === "http/2" || normalized === "http/2.0") {
+    return "http/2.0";
+  }
+  if (normalized === "h3" || normalized === "http/3" || normalized === "http/3.0") {
+    return "http/3.0";
+  }
+  return normalized;
 }
 
 function headerValue(headers, wantedName) {

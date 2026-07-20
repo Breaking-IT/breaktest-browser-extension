@@ -250,6 +250,19 @@ def validate() -> list[str]:
         errors.append("PRIVACY.md is missing")
     elif "browser-local IndexedDB" not in (ROOT / "PRIVACY.md").read_text(encoding="utf-8"):
         errors.append("PRIVACY.md does not disclose staged HAR export retention")
+
+    metadata_test = subprocess.run(
+        ["node", str(ROOT / "scripts" / "test_chrome_request_metadata.js")],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if metadata_test.returncode:
+        errors.append(
+            "Chrome request metadata ordering tests failed:\n"
+            f"{metadata_test.stderr.strip() or metadata_test.stdout.strip()}"
+        )
     return errors
 
 
