@@ -234,10 +234,48 @@ async function testRedirectOrdering(firstHasExtraInfo) {
   assert.strictEqual(attempts[1].status, 200);
 }
 
+async function testMemoryCacheMarker() {
+  resetRecording();
+  await vm.runInContext(`requestWillBeSent({tabId: 1}, {
+    requestId: "cached",
+    timestamp: 1,
+    wallTime: 1784557822,
+    type: "Image",
+    request: {
+      method: "GET",
+      url: "https://example.test/image.png",
+      headers: {Referer: "https://example.test/"}
+    }
+  })`, context);
+  vm.runInContext(`requestServedFromCache({tabId: 1}, {
+    requestId: "cached"
+  })`, context);
+  vm.runInContext(`responseReceived({tabId: 1}, {
+    requestId: "cached",
+    timestamp: 2,
+    type: "Image",
+    hasExtraInfo: false,
+    response: {
+      status: 200,
+      protocol: "h2",
+      headers: {"content-type": "image/png"}
+    }
+  })`, context);
+  vm.runInContext(`(() => {
+    const state = recording.activeRequests.get("root:cached");
+    finalizeRequest(state, 2);
+    recording.activeRequests.delete("root:cached");
+  })()`, context);
+
+  const fromCache = vm.runInContext(`recording.entries[0]._fromCache`, context);
+  assert.strictEqual(fromCache, "memory");
+}
+
 async function main() {
   await testExtraInfoBeforeRequest();
   await testRedirectOrdering(true);
   await testRedirectOrdering(false);
+  await testMemoryCacheMarker();
   console.log("Chrome request metadata ordering tests passed");
 }
 

@@ -545,6 +545,9 @@ async function handleDebuggerEvent(source, method, params) {
     case "Network.requestWillBeSentExtraInfo":
       requestExtraInfo(source, params);
       break;
+    case "Network.requestServedFromCache":
+      requestServedFromCache(source, params);
+      break;
     case "Network.responseReceived":
       responseReceived(source, params);
       break;
@@ -748,6 +751,13 @@ function requestExtraInfo(source, params) {
   reconcileExtraInfo(chain);
 }
 
+function requestServedFromCache(source, params) {
+  const state = recording.activeRequests.get(requestKey(source, params.requestId));
+  if (state) {
+    state.fromMemoryCache = true;
+  }
+}
+
 function responseReceived(source, params) {
   const state = recording.activeRequests.get(requestKey(source, params.requestId));
   if (!state) {
@@ -890,7 +900,11 @@ function finalizeRequest(state, finishedTimestamp) {
     serverIPAddress: state.serverIPAddress || "",
     connection: state.connection || "",
     _resourceType: state.resourceType,
-    _fromCache: state.fromDiskCache ? "disk" : (state.fromServiceWorker ? "service-worker" : undefined),
+    _fromCache: state.fromDiskCache
+      ? "disk"
+      : (state.fromMemoryCache
+        ? "memory"
+        : (state.fromServiceWorker ? "service-worker" : undefined)),
     _breaktest: {
       transactionId: state.transaction.id,
       transactionName: state.transaction.name,
