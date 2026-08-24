@@ -136,7 +136,23 @@ async function initialize() {
   await restoreRecordingConsent();
   await removeExpiredIncognitoLaunch();
   await restoreStatus();
+  await prefillStartUrl();
   await restorePendingExport();
+}
+
+async function prefillStartUrl() {
+  if (active || startUrl.value.trim()) {
+    return;
+  }
+  try {
+    const [tab] = await chrome.tabs.query({active: true, lastFocusedWindow: true});
+    const url = tab?.url;
+    if (typeof url === "string" && /^https?:/i.test(url)) {
+      startUrl.value = url;
+    }
+  } catch (_ignored) {
+    // The field remains optional if the active tab URL is unavailable.
+  }
 }
 
 async function restorePendingExport() {
@@ -621,10 +637,12 @@ function renderTransactions(transactions) {
       const row = document.createElement("div");
       row.className = "transaction-row";
 
-      const label = document.createElement("span");
-      label.className = "transaction-name";
+      const label = document.createElement("button");
+      label.type = "button";
+      label.className = "quiet transaction-name transaction-open";
       label.textContent = `${transaction.name} (${transaction.requestCount ?? 0})`;
-      label.title = transaction.name;
+      label.title = `View requests in ${transaction.name}`;
+      label.addEventListener("click", () => openTransactionDetails(transaction));
 
       const actions = document.createElement("span");
       actions.className = "transaction-actions";
@@ -664,6 +682,23 @@ function renderTransactions(transactions) {
         renderTransactions(response.transactions || []);
       }
     });
+  }
+}
+
+async function openTransactionDetails(transaction) {
+  const url = new URL(chrome.runtime.getURL("transaction-details.html"));
+  url.searchParams.set("transaction", transaction.id);
+  try {
+    await chrome.windows.create({
+      url: url.href,
+      type: "popup",
+      width: 1000,
+      height: 700,
+      focused: true,
+      incognito: inIncognitoContext
+    });
+  } catch (error) {
+    showError(`Unable to open transaction requests: ${error.message}`);
   }
 }
 

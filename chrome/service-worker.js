@@ -90,6 +90,8 @@ async function handleMessage(message) {
       return renameTransaction(message.id, message.name);
     case "delete-transaction":
       return deleteTransaction(message.id, message.requestDisposition);
+    case "transaction-details":
+      return transactionDetails(message.id);
     case "stop-recording":
       return stopRecording();
     case "cancel-recording":
@@ -451,6 +453,34 @@ function editableTransaction(id) {
     throw new Error("The selected transaction no longer exists");
   }
   return transaction;
+}
+
+function transactionDetails(id) {
+  if (!recording) {
+    throw new Error("No recording is active");
+  }
+  const transaction = recording.transactions.find(item => item.id === id);
+  if (!transaction) {
+    throw new Error("The selected transaction no longer exists");
+  }
+  const requests = recording.entries
+    .filter(entry => entry._breaktest.transactionId === id)
+    .sort((left, right) => {
+      const timeDifference = Date.parse(left.startedDateTime) - Date.parse(right.startedDateTime);
+      return timeDifference || left._breaktest.entryOrdinal - right._breaktest.entryOrdinal;
+    })
+    .map(entry => ({
+      id: String(entry._breaktest.entryOrdinal),
+      ordinal: entry._breaktest.entryOrdinal,
+      transactionId: id,
+      method: entry.request.method,
+      url: entry.request.url,
+      status: entry.response.status,
+      failed: entry._breaktest.failed,
+      startedDateTime: entry.startedDateTime,
+      time: entry.time
+    }));
+  return {ok: true, transaction, requests};
 }
 
 async function stopRecording() {
@@ -912,6 +942,7 @@ function finalizeRequest(state, finishedTimestamp) {
 
   const summary = {
     id: state.entryId,
+    ordinal: state.ordinal,
     transactionId: state.transaction.id,
     transactionName: state.transaction.name,
     method: state.request.method,
@@ -919,6 +950,8 @@ function finalizeRequest(state, finishedTimestamp) {
     status: state.response.status,
     resourceType: state.resourceType,
     size: state.response.bodySize,
+    startedDateTime: state.startedDateTime,
+    time: totalMs,
     failed: state.failed,
     bodyTruncated: state.bodyTruncated,
     bodyUnavailable: Boolean(state.bodyUnavailable)

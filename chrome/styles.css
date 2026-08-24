@@ -115,10 +115,37 @@ button.quiet { border: 0; padding: 3px 5px; color: var(--muted); font-size: 11px
 #transaction-list li { padding: 3px 0; }
 .transaction-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .transaction-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.transaction-open { padding: 3px 2px; border-radius: 4px; color: var(--text); font-size: 12px; text-align: left; }
+button.transaction-open:hover { background: color-mix(in srgb, var(--primary) 9%, transparent); }
 .transaction-actions { display: inline-flex; flex: none; gap: 2px; }
 button.transaction-action { width: 24px; height: 24px; padding: 0; font-size: 15px; line-height: 1; }
 button.transaction-delete { color: var(--danger); font-size: 18px; }
 button.transaction-action:disabled { cursor: not-allowed; opacity: .35; }
+.request-detail-page { min-width: 720px; min-height: 100vh; }
+.request-detail-main { display: block; min-height: 100vh; padding: 12px; }
+.request-detail-panel { display: grid; gap: 10px; min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.request-detail-heading { padding: 12px 14px 0; }
+.request-detail-heading > div { min-width: 0; }
+.request-detail-heading h1 { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; }
+.request-detail-heading p { margin-top: 2px; color: var(--muted); font-size: 11px; }
+.request-detail-heading .request-detail-eyebrow { margin: 0; color: var(--primary); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.request-detail-table-wrap { max-height: calc(100vh - 92px); overflow: auto; border-top: 1px solid var(--border); }
+.request-detail-table { width: 100%; min-width: 720px; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+.request-detail-table th { position: sticky; top: 0; z-index: 1; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--background); color: var(--muted); font-size: 10px; text-align: left; text-transform: uppercase; }
+.request-detail-table td { height: 42px; padding: 4px 10px; border-bottom: 1px solid var(--border); overflow: hidden; vertical-align: middle; }
+.request-detail-table tr:last-child td { border-bottom: 0; }
+.request-detail-table tr.failed { background: var(--failure); }
+.request-detail-table th:nth-child(1), .request-detail-table td:nth-child(1) { width: 70px; }
+.request-detail-table th:nth-child(2), .request-detail-table td:nth-child(2) { width: 80px; }
+.request-detail-table th:nth-child(4), .request-detail-table td:nth-child(4) { width: 100px; text-align: right; }
+.request-detail-status, .request-detail-time { font-variant-numeric: tabular-nums; }
+.request-detail-status { color: var(--muted); font-weight: 700; }
+.request-detail-method { color: var(--muted); font-weight: 700; }
+.request-detail-url-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.waterfall-track { position: relative; height: 10px; margin-top: 3px; overflow: hidden; border-radius: 2px; background: repeating-linear-gradient(to right, color-mix(in srgb, var(--border) 55%, transparent) 0 1px, transparent 1px 25%); }
+.waterfall-bar { position: absolute; top: 2px; bottom: 2px; min-width: 2px; border-radius: 2px; background: var(--primary); }
+.request-detail-table tr.failed .waterfall-bar { background: var(--danger); }
+.request-detail-empty { padding: 36px 12px; color: var(--muted); font-size: 12px; text-align: center; }
 .transaction-dialog { width: min(360px, calc(100vw - 24px)); padding: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); }
 .transaction-dialog::backdrop { background: rgb(0 0 0 / 45%); }
 .transaction-dialog-content { display: grid; gap: 12px; padding: 16px; }
