@@ -1,0 +1,44 @@
+<!doctype html>
+<!--
+  Copyright 2024-2026 Breaking IT
+
+  Licensed under the BreakTest Community Source License 1.0.
+  You may not use this file except in compliance with that license.
+  See the LICENSE file at the root of this distribution.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Transaction requests · BreakTest</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="request-detail-page">
+  <main class="request-detail-main">
+    <section class="request-detail-panel" aria-labelledby="transaction-details-title">
+      <div class="request-detail-heading">
+        <div>
+          <p class="request-detail-eyebrow">Transaction requests</p>
+          <h1 id="transaction-details-title">Loading transaction…</h1>
+          <p id="transaction-details-summary"></p>
+        </div>
+      </div>
+      <div class="request-detail-table-wrap">
+        <table class="request-detail-table">
+          <thead>
+            <tr>
+              <th scope="col">HTTP</th>
+              <th scope="col">Method</th>
+              <th scope="col">URL &amp; waterfall</th>
+              <th scope="col" title="Response time">Time</th>
+            </tr>
+          </thead>
+          <tbody id="transaction-details-requests"></tbody>
+        </table>
+        <p id="transaction-details-empty" class="request-detail-empty">No completed requests in this transaction yet.</p>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="transaction-details.js"></script>
+</body>
+</html>

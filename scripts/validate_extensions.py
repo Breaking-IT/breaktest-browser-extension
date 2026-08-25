@@ -211,6 +211,14 @@ def validate() -> list[str]:
             errors.append(f"{browser}: transaction edit and delete controls are missing")
         if "chooseTransactionRemoval" not in panel_script or "requestDisposition" not in panel_script:
             errors.append(f"{browser}: transaction removal choices are missing from the recorder UI")
+        if "transaction-details.html" not in panel_script or "windows.create" not in panel_script:
+            errors.append(f"{browser}: transaction requests do not open in a dedicated popup window")
+        details_page = browser_dir / "transaction-details.html"
+        details_script = browser_dir / "transaction-details.js"
+        if not details_page.is_file() or not details_script.is_file():
+            errors.append(f"{browser}: transaction details popup files are missing")
+        elif "transaction-details.js" not in details_page.read_text(encoding="utf-8"):
+            errors.append(f"{browser}: transaction details popup script is not loaded")
         if 'id="move-requests-previous"' not in panel or 'id="move-requests-next"' not in panel:
             errors.append(f"{browser}: previous and next transaction choices are missing from the dialog")
         if "HarExportStore.save(har)" not in background_source:
