@@ -1,6 +1,6 @@
 # Chrome Web Store submission checklist
 
-Use this checklist for the `1.1.0` submission. Keep the answers aligned
+Use this checklist for the `1.1.1` submission. Keep the answers aligned
 with [LISTING.md](LISTING.md), [REVIEW_NOTES.md](REVIEW_NOTES.md), and the
 public [privacy policy](../PRIVACY.md).
 
@@ -21,7 +21,7 @@ python3 scripts/validate_extensions.py
 python3 scripts/package_extensions.py
 ```
 
-Upload `dist/breaktest-browser-recorder-chrome-edge-1.1.0.zip`. The generated
+Upload `dist/breaktest-browser-recorder-chrome-edge-1.1.1.zip`. The generated
 ZIP and checksums are release artifacts and are intentionally not committed.
 
 ## 3. Store listing
