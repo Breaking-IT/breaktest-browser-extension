@@ -177,3 +177,8 @@ button.transaction-action:disabled { cursor: not-allowed; opacity: .35; }
 .launcher-card dt { color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; }
 .launcher-card dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 13px; }
 .launcher-button { width: 100%; padding: 11px; font-weight: 700; }
+
+#next-transaction-button { flex: 0 0 36px; font-size: 20px; line-height: 1; }
+#next-transaction-error { color: var(--danger, #c62828); }
+
+.start-controls > button { flex: 1 1 0; min-width: 0; }

@@ -31,17 +31,13 @@ Firefox removes temporary add-ons when the browser exits. Repeat these steps
 after restarting Firefox. Changes to the extension source also require using
 **Reload** beside the extension on the `about:debugging` page.
 
-## Record from the first homepage request
+## Start recording
 
-1. Open the recorder from its toolbar icon or Firefox sidebar.
-2. Enter the **Start URL**.
-3. Keep `01_OpenHomepage` as the initial transaction name, or replace it.
-4. Optionally select **Disable browser cache while recording**.
-5. Choose **Start in new tab**.
-
-The extension creates a new tab, activates capture, and then navigates to the
-Start URL. **Start current tab** only captures requests that begin after the
-recorder starts; it cannot recover the page's original load.
+Open the page and recorder sidebar, choose the initial transaction name, and
+click **Start recording here**. The current page is not reloaded or navigated.
+Reload it manually after starting if you want to capture its initial load.
+For a fresh private window, enter the **Incognito start URL** and click
+**Start in incognito**. The URL field applies only to the private-window action.
 
 The cache option is off by default. Firefox exposes cache control as a global
 browser setting, so selecting it temporarily disables the cache for all
@@ -51,10 +47,13 @@ HTTP cache, so use this option when that distinction matters.
 
 ## Name and export transactions
 
-The transaction field is the name assigned to new requests. Type the next name,
-then move the pointer toward the action that should start that transaction. The
-name is committed after typing stops; requests already in progress keep their
-original transaction.
+The transaction field shows the current transaction. Click **→** on its right
+to open **Next transaction**. `01_Openhomepage` suggests `02_`, and
+`UC1_01_Homepage` suggests `UC1_02_`; leading zeros and the prefix are preserved.
+Names without a numeric counter start at `01_`. Enter a description and press
+Enter or **Start transaction**. Cancel or Escape leaves the current transaction
+unchanged. Requests stay in the current transaction until confirmation, and
+requests already in progress retain their original transaction.
 
 Use the edit icon in the Transactions list to rename a transaction and update
 all requests already assigned to it. Use the × button to remove an earlier
@@ -109,7 +108,7 @@ until the last private window closes.
 ## Troubleshooting
 
 If an internal Firefox page cannot be recorded, enter an HTTP or HTTPS Start
-URL and use **Start in new tab**. If the private launcher cannot start, verify
+URL and use **Start in incognito**. If the private launcher cannot start, verify
 **Run in Private Windows** is allowed, close the private window, reload the
 temporary add-on, and try again.
 

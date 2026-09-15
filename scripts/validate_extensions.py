@@ -166,7 +166,7 @@ def validate() -> list[str]:
             errors.append(f"{browser}: recorder UI does not contain recording consent")
         if "cleaned up after 24 hours" not in panel:
             errors.append(f"{browser}: recorder UI does not disclose pending HAR retention")
-        for button_id in ("start-button", "blank-start-button"):
+        for button_id in ("start-button", "incognito-start-button" if browser == "chrome" else "private-start-button"):
             if not re.search(rf'<button\s+[^>]*id="{button_id}"[^>]*\bdisabled\b', panel):
                 errors.append(f"{browser}: {button_id} must be disabled before consent")
         if "function requireRecordingConsent()" not in panel_script:
@@ -181,8 +181,8 @@ def validate() -> list[str]:
             errors.append(f"{browser}: private-window launches do not carry consent state")
         if "saveAs: true" not in panel_script:
             errors.append(f"{browser}: HAR export does not require a Save As dialog")
-        if "Start in new tab" not in panel:
-            errors.append(f"{browser}: the new-tab recording action is not clearly labelled")
+        if "Start recording" not in panel or "blank-start-button" in panel:
+            errors.append(f"{browser}: start actions must use Start recording without a new-tab button")
         if "discard-button" not in panel or 'type: "cancel-recording"' not in panel_script:
             errors.append(f"{browser}: recordings cannot be explicitly discarded")
 
@@ -279,6 +279,12 @@ def validate() -> list[str]:
     )
     if upload_test.returncode:
         errors.append(f"Upload capture tests failed:\n{upload_test.stderr or upload_test.stdout}")
+    controls_test = subprocess.run(
+        ["node", str(ROOT / "scripts" / "test_recorder_controls.js")],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    if controls_test.returncode:
+        errors.append(f"Recorder controls tests failed:\n{controls_test.stderr or controls_test.stdout}")
     for filename in ("upload-store.js", "upload-capture.js"):
         if (ROOT / "chrome" / filename).read_bytes() != (ROOT / "firefox" / filename).read_bytes():
             errors.append(f"Upload capture sources differ between browsers: {filename}")
