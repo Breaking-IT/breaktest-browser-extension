@@ -269,3 +269,13 @@ The `scripting` and host permissions let the isolated content script read files
 in the recorded tab and its accessible frames. It asks the background recorder
 whether that tab is recording before reading any bytes, and does not send file
 contents to the page or any external service.
+
+## Find the recording tab
+
+Click **Go to recording tab** in the recorder, or press **Command+Shift+9** on
+macOS (**Ctrl+Shift+9** on Windows/Linux). This selects the recorded tab and
+focuses its window, including an incognito recording. If multiple recording
+contexts exist, the current context's recording is preferred, then the most
+recent one. Chrome's shortcut can be reassigned at `chrome://extensions/shortcuts`
+if another extension already uses it. Pin the extension to see the red **REC**
+badge, which now appears only when the recorded tab is selected.

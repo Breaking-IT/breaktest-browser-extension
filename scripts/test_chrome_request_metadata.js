@@ -24,6 +24,7 @@ context.HarExportStore = {
   save: async () => ({id: "export"})
 };
 context.chrome = {
+  commands: {onCommand: listener()},
   runtime: {
     onInstalled: listener(),
     onStartup: listener(),
@@ -300,7 +301,61 @@ async function testNavigationFailureKeepsRecording() {
   }
 }
 
+async function testRecordingLocator() {
+  await vm.runInContext('locatorWrites', context);
+  const originals = {get: context.chrome.storage.local.get, set: context.chrome.storage.local.set,
+    remove: context.chrome.storage.local.remove, tabGet: context.chrome.tabs.get,
+    tabUpdate: context.chrome.tabs.update, windowUpdate: context.chrome.windows.update,
+    targets: context.chrome.debugger.getTargets, badge: context.chrome.action.setBadgeText};
+  const store = {};
+  const selected = [];
+  const focused = [];
+  const badges = [];
+  context.chrome.storage.local.get = async () => store;
+  context.chrome.storage.local.set = async values => Object.assign(store, values);
+  context.chrome.storage.local.remove = async key => { delete store[key]; };
+  context.chrome.tabs.get = async id => {
+    if (id === 99) throw new Error('closed');
+    return {id, windowId: id + 100};
+  };
+  context.chrome.tabs.update = async (id, options) => { selected.push([id, options.active]); };
+  context.chrome.windows.update = async (id, options) => { focused.push([id, options.focused]); };
+  context.chrome.debugger.getTargets = async () => [{tabId: 2, attached: true}, {tabId: 99, attached: true}];
+  context.chrome.action.setBadgeText = async options => { badges.push(options); };
+  try {
+    vm.runInContext('recording = {tabId: 1, startedAt: 1}; setRecordingBadge(true)', context);
+    await vm.runInContext('locatorWrites', context);
+    assert.strictEqual(store.recordingLocatorNormal.tabId, 1);
+    await vm.runInContext('focusRecordingTab()', context);
+    assert.deepStrictEqual(selected.pop(), [1, true]);
+    assert.deepStrictEqual(focused.pop(), [101, true]);
+    assert.ok(badges.some(item => item.tabId === 1 && item.text === 'REC'));
+    assert.ok(!badges.some(item => item.tabId === undefined && item.text === 'REC'));
+    vm.runInContext('setRecordingBadge(false); recording = null', context);
+    await vm.runInContext('locatorWrites', context);
+    assert.strictEqual(store.recordingLocatorNormal, undefined);
+    store.recordingLocatorPrivate = {tabId: 2, startedAt: 2};
+    await vm.runInContext('focusRecordingTab()', context);
+    assert.deepStrictEqual(selected.pop(), [2, true]);
+    assert.deepStrictEqual(focused.pop(), [102, true]);
+    store.recordingLocatorPrivate = {tabId: 99, startedAt: 2};
+    await assert.rejects(vm.runInContext('focusRecordingTab()', context), /No active recording tab/);
+    delete store.recordingLocatorPrivate;
+    await assert.rejects(vm.runInContext('focusRecordingTab()', context), /No active recording tab/);
+  } finally {
+    context.chrome.storage.local.get = originals.get;
+    context.chrome.storage.local.set = originals.set;
+    context.chrome.storage.local.remove = originals.remove;
+    context.chrome.tabs.get = originals.tabGet;
+    context.chrome.tabs.update = originals.tabUpdate;
+    context.chrome.windows.update = originals.windowUpdate;
+    context.chrome.debugger.getTargets = originals.targets;
+    context.chrome.action.setBadgeText = originals.badge;
+  }
+}
+
 async function main() {
+  await testRecordingLocator();
   await testNavigationFailureKeepsRecording();
   await testExtraInfoBeforeRequest();
   await testRedirectOrdering(true);

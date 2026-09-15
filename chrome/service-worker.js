@@ -19,7 +19,14 @@ const INCOGNITO_LAUNCH_KEY = "pendingIncognitoLaunch";
 const RECORDING_DISCLOSURE_VERSION = 3;
 
 let recording = null;
-
+const RECORDING_LOCATOR_KEY = chrome.extension.inIncognitoContext ? "recordingLocatorPrivate" : "recordingLocatorNormal";
+// Clear this background context's stale locator after an extension/browser restart.
+let locatorWrites = chrome.storage.local.remove(RECORDING_LOCATOR_KEY).catch(() => {});
+chrome.commands.onCommand.addListener(command => {
+  if (command === "focus-recording-tab") {
+    focusRecordingTab().catch(error => notify("recorder-warning", {message: errorMessage(error)}));
+  }
+});
 
 chrome.runtime.onInstalled.addListener(() => {
   configureExistingTabPanels().catch(error => console.error(error));
@@ -101,6 +108,8 @@ async function handleMessage(message, sender = {}) {
       return stopRecording();
     case "cancel-recording":
       return cancelRecording();
+    case "focus-recording-tab":
+      return focusRecordingTab();
     case "recorder-status":
       return recorderStatus();
     default:
@@ -1206,10 +1215,40 @@ async function safeCommand(target, method, params) {
 }
 
 function setRecordingBadge(active) {
-  chrome.action.setBadgeText({text: active ? "REC" : ""});
-  if (active) {
-    chrome.action.setBadgeBackgroundColor({color: "#c62828"});
+  const owner = recording;
+  // A global badge follows every tab, so explicitly use a tab-specific badge.
+  chrome.action.setBadgeText({text: ""}).catch(() => {});
+  if (Number.isInteger(owner?.tabId)) {
+    chrome.action.setBadgeText({tabId: owner.tabId, text: active ? "REC" : ""}).catch(() => {});
+    if (active) chrome.action.setBadgeBackgroundColor({tabId: owner.tabId, color: "#c62828"}).catch(() => {});
   }
+  locatorWrites = locatorWrites.catch(() => {}).then(() => active && owner
+    ? chrome.storage.local.set({[RECORDING_LOCATOR_KEY]: {tabId: owner.tabId, startedAt: owner.startedAt}})
+    : chrome.storage.local.remove(RECORDING_LOCATOR_KEY));
+  locatorWrites.catch(error => console.error(error));
+}
+
+async function focusRecordingTab() {
+  await locatorWrites;
+  const stored = await chrome.storage.local.get(["recordingLocatorNormal", "recordingLocatorPrivate"]);
+  let candidates = [stored.recordingLocatorNormal, stored.recordingLocatorPrivate]
+    .filter(candidate => Number.isInteger(candidate?.tabId))
+    .sort((a, b) => b.startedAt - a.startedAt);
+  if (recording && !recording.stopping) {
+    candidates.unshift({tabId: recording.tabId});
+  }
+
+  const attached = new Set((await chrome.debugger.getTargets()).filter(target => target.attached).map(target => target.tabId));
+  candidates = candidates.filter(candidate => candidate.tabId === recording?.tabId || attached.has(candidate.tabId));
+
+  for (const candidate of candidates) {
+    let tab;
+    try { tab = await chrome.tabs.get(candidate.tabId); } catch (_error) { continue; }
+    await chrome.tabs.update(tab.id, {active: true});
+    await chrome.windows.update(tab.windowId, {focused: true});
+    return {ok: true, tabId: tab.id};
+  }
+  throw new Error("No active recording tab was found. It may have been closed or the recording has finished.");
 }
 
 function notify(type, payload) {

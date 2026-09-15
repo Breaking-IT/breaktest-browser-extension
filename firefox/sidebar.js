@@ -8,6 +8,19 @@
 
 import "./har-export-store.js";
 
+const focusRecordingButton = document.querySelector("#focus-recording-tab");
+focusRecordingButton.addEventListener("click", async () => {
+  focusRecordingButton.disabled = true;
+  try {
+    const response = await send({type: "focus-recording-tab"});
+    if (!response?.ok) throw new Error(response?.error || "Unable to find the recording tab");
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    focusRecordingButton.disabled = false;
+  }
+});
+
 const transactionName = document.querySelector("#transaction-name");
 const startUrl = document.querySelector("#start-url");
 const disableCache = document.querySelector("#disable-cache");

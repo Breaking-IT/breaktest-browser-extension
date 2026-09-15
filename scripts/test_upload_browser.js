@@ -46,6 +46,18 @@ const path = require("node:path");
       await startRecording({tabId: tab.id, transactionName: "File upload"});
     }, url);
     assert.equal(await page.evaluate(() => window.recordingStartMarker), "preserve-current-page");
+    await worker.evaluate(async () => {
+      const recordedId = recorderStatus().tabId;
+      const otherWindow = await chrome.windows.create({url: "about:blank"});
+      try {
+        const result = await handleMessage({type: "focus-recording-tab"});
+        if (result.tabId !== recordedId) throw new Error("Wrong recording tab selected");
+        const tab = await chrome.tabs.get(recordedId);
+        if (!tab.active || !(await chrome.windows.get(tab.windowId)).focused) throw new Error("Recording window not focused");
+        if (await chrome.action.getBadgeText({tabId: recordedId}) !== "REC") throw new Error("Recording badge missing");
+        if (await chrome.action.getBadgeText({tabId: otherWindow.tabs[0].id}) !== "") throw new Error("Badge leaked to another tab");
+      } finally { await chrome.windows.remove(otherWindow.id); }
+    });
     const body = Buffer.from('{"log":{"entries":[]},"test":"HAR upload é😀"}');
     await page.locator('input[type="file"]').setInputFiles({name: "source.har", mimeType: "application/json", buffer: body});
     await page.waitForTimeout(50);

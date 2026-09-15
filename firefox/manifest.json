@@ -74,5 +74,14 @@
       "all_frames": true,
       "match_about_blank": true
     }
-  ]
+  ],
+  "commands": {
+    "focus-recording-tab": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+9",
+        "mac": "Command+Shift+9"
+      },
+      "description": "Go to the recording tab"
+    }
+  }
 }
