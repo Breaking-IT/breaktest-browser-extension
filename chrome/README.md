@@ -150,6 +150,15 @@ The browser does not automatically update an unpacked extension.
 
 ## Troubleshooting
 
+### The start page requires HTTP authentication or fails to load
+
+Recording becomes active before the incognito start URL is opened. A 401
+challenge or navigation error leaves the recorder attached and preserves the
+requests already captured. Complete the browser's authentication prompt or
+retry the page while recording remains active, then finish and export normally.
+Failure to attach the debugger or enable network capture still stops startup.
+
+
 ### “Chrome internal and extension pages cannot be recorded”
 
 The selected tab is a New Tab, settings page, extension page, or another

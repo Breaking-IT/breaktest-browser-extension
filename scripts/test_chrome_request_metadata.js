@@ -236,7 +236,66 @@ async function testRedirectOrdering(firstHasExtraInfo) {
   assert.strictEqual(attempts[1].status, 200);
 }
 
+async function testNavigationFailureKeepsRecording() {
+  const originalCommand = context.chrome.debugger.sendCommand;
+  const originalAttach = context.chrome.debugger.attach;
+  const originalDetach = context.chrome.debugger.detach;
+  const originalNotify = context.chrome.runtime.sendMessage;
+  let detached = 0;
+  const notifications = [];
+  context.chrome.debugger.detach = async () => { detached++; };
+  context.chrome.runtime.sendMessage = async message => { notifications.push(message); };
+  try {
+    for (const failure of ["net::ERR_INVALID_AUTH_CREDENTIALS", "net::ERR_NAME_NOT_RESOLVED", "command-rejected"]) {
+      vm.runInContext("recording = null", context);
+      notifications.length = 0;
+      detached = 0;
+      context.chrome.debugger.sendCommand = async (source, method) => {
+        if (method !== "Page.navigate") return {};
+        assert.ok(notifications.some(message => message.type === "recording-started" && message.active));
+        await vm.runInContext(`requestWillBeSent({tabId: 1}, {
+          requestId: "auth", timestamp: 1, wallTime: 1784557822, type: "Document",
+          request: {method: "GET", url: "https://example.test/auth", headers: {}}
+        })`, context);
+        vm.runInContext(`responseReceived({tabId: 1}, {
+          requestId: "auth", timestamp: 2, hasExtraInfo: false,
+          response: {status: 401, headers: {"www-authenticate": 'Basic realm="test"'}, protocol: "http/1.1"}
+        }); loadingFailed({tabId: 1}, {requestId: "auth", timestamp: 3, errorText: "authentication required"});`, context);
+        if (failure === "command-rejected") throw new Error("navigation command failed");
+        return {errorText: failure};
+      };
+      const result = await vm.runInContext('startRecording({tabId: 1, transactionName: "01_Auth", startUrl: "https://example.test/auth"})', context);
+      assert.strictEqual(result.active, true);
+      assert.strictEqual(result.attached, true);
+      assert.strictEqual(detached, 0);
+      assert.match(result.startWarning, /Recording is active/);
+      assert.strictEqual(vm.runInContext('recording.entries[0].response.status', context), 401);
+      await vm.runInContext(`requestWillBeSent({tabId: 1}, {
+        requestId: "retry", timestamp: 4, wallTime: 1784557825, type: "Document",
+        request: {method: "GET", url: "https://example.test/auth", headers: {}}
+      })`, context);
+      assert.strictEqual(vm.runInContext('recording.activeRequests.has("root:retry")', context), true);
+    }
+    // Genuine attachment/setup errors must still fail and clean up.
+    vm.runInContext("recording = null", context);
+    context.chrome.debugger.attach = async () => { throw new Error("attach denied"); };
+    await assert.rejects(vm.runInContext('startRecording({tabId: 1, transactionName: "01_Auth"})', context), /attach denied/);
+    assert.strictEqual(vm.runInContext('recording', context), null);
+    context.chrome.debugger.attach = originalAttach;
+    context.chrome.debugger.sendCommand = async () => { throw new Error("network enable failed"); };
+    await assert.rejects(vm.runInContext('startRecording({tabId: 1, transactionName: "01_Auth"})', context), /network enable failed/);
+    assert.strictEqual(vm.runInContext('recording', context), null);
+    assert.strictEqual(detached, 1);
+  } finally {
+    context.chrome.debugger.sendCommand = originalCommand;
+    context.chrome.debugger.attach = originalAttach;
+    context.chrome.debugger.detach = originalDetach;
+    context.chrome.runtime.sendMessage = originalNotify;
+  }
+}
+
 async function main() {
+  await testNavigationFailureKeepsRecording();
   await testExtraInfoBeforeRequest();
   await testRedirectOrdering(true);
   await testRedirectOrdering(false);

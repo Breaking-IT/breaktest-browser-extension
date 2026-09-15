@@ -8,7 +8,14 @@ const path = require("node:path");
 (async () => {
   const received = [];
   const server = http.createServer((request, response) => {
-    if (request.method === "POST") {
+    if (request.url === "/auth") {
+      if (request.headers.authorization === "Basic dGVzdDp0ZXN0") {
+        response.end("Authenticated");
+      } else {
+        response.writeHead(401, {"WWW-Authenticate": 'Basic realm="Recorder test"'});
+        response.end("Authentication required");
+      }
+    } else if (request.method === "POST") {
       const chunks = [];
       request.on("data", chunk => chunks.push(chunk));
       request.on("end", () => {
@@ -57,6 +64,25 @@ const path = require("node:path");
     assert.deepEqual(Buffer.from(file.content, "base64"), body);
     assert.ok(har.log.entries.some(entry => entry.request.method === "POST"));
     console.log("Chromium: real multipart upload and saved HAR file bytes passed");
+    const authStatus = await worker.evaluate(async url => {
+      const tabs = await chrome.tabs.query({});
+      const tab = tabs.find(item => item.url === url + "upload");
+      return startRecording({tabId: tab.id, transactionName: "01_Auth", startUrl: url + "auth"});
+    }, url);
+    assert.equal(authStatus.active, true);
+    assert.equal(authStatus.attached, true);
+    // Supply credentials only to this local test server and retry the challenged page.
+    await page.setExtraHTTPHeaders({Authorization: "Basic dGVzdDp0ZXN0"});
+    await page.goto(url + "auth");
+    assert.equal(await page.locator("body").innerText(), "Authenticated");
+    const authHar = await worker.evaluate(async () => {
+      const result = await stopRecording();
+      const record = await HarExportStore.get(result.export.id);
+      return JSON.parse(await record.blob.text());
+    });
+    assert.ok(authHar.log.entries.some(entry => entry.response.status === 401), "Initial 401 retained");
+    assert.ok(authHar.log.entries.some(entry => entry.request.url.endsWith("/auth") && entry.response.status === 200), "Authenticated retry retained");
+    console.log("Chromium: initial 401 and authenticated retry retained in the same HAR");
   } finally {
     await context?.close();
     await new Promise(resolve => server.close(resolve));

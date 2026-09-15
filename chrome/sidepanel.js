@@ -271,6 +271,7 @@ async function restoreStatus() {
     return;
   }
   applyStatus(response);
+  if (response.startWarning) setStatus(response.startWarning);
   if (!response.active) {
     requestList.replaceChildren();
     transactionList.replaceChildren();

@@ -221,19 +221,28 @@ async function startRecording(message) {
     if (createBlankTab) {
       await moveRecorderToTab(tabId);
     }
-    if (startUrl) {
-      const navigation = await chrome.debugger.sendCommand({tabId}, "Page.navigate", {url: startUrl});
-      if (navigation?.errorText) {
-        throw new Error(`Unable to navigate to ${startUrl}: ${navigation.errorText}`);
-      }
-    }
   } catch (error) {
     await discardCurrentRecording();
     throw error;
   }
 
+  // Capture is ready before navigation, which may pause for HTTP authentication.
+  const owner = recording;
   setRecordingBadge(true);
   notify("recording-started", recorderStatus());
+  if (startUrl) {
+    try {
+      const navigation = await chrome.debugger.sendCommand({tabId}, "Page.navigate", {url: startUrl});
+      if (navigation?.errorText) throw new Error(navigation.errorText);
+    } catch (error) {
+      // A failed page load is recording evidence, not a failed debugger setup.
+      // Keep the initial request and continue capturing authentication retries.
+      if (recording === owner && !owner.stopping) {
+        owner.startWarning = `Recording is active. The start page could not load (${errorMessage(error)}). Complete authentication or retry the page; requests will continue to be captured.`;
+        notify("recorder-warning", {message: owner.startWarning});
+      }
+    }
+  }
   return recorderStatus();
 }
 
@@ -1125,6 +1134,7 @@ function recorderStatus() {
     attached: recording.attached,
     reconnecting: recording.reconnecting,
     detachReason: recording.detachReason,
+    startWarning: recording.startWarning || null,
     tabId: recording.tabId,
     currentTransaction: recording.currentTransaction,
     transactions: recording.transactions,
