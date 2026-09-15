@@ -270,6 +270,12 @@ async function testNavigationFailureKeepsRecording() {
       assert.strictEqual(detached, 0);
       assert.match(result.startWarning, /Recording is active/);
       assert.strictEqual(vm.runInContext('recording.entries[0].response.status', context), 401);
+      const detail = vm.runInContext('transactionDetails(recording.currentTransaction.id).requests[0]', context);
+      assert.strictEqual(detail.timingSource, "response-events");
+      assert.strictEqual(detail.timings.wait, 1000);
+      assert.strictEqual(detail.timings.receive, 1000);
+      assert.strictEqual(detail.timings.connect, -1);
+      assert.strictEqual(vm.runInContext('recording.summaries[0].timings.receive', context), 1000);
       await vm.runInContext(`requestWillBeSent({tabId: 1}, {
         requestId: "retry", timestamp: 4, wallTime: 1784557825, type: "Document",
         request: {method: "GET", url: "https://example.test/auth", headers: {}}

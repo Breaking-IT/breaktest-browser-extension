@@ -129,22 +129,32 @@ button.transaction-action:disabled { cursor: not-allowed; opacity: .35; }
 .request-detail-heading h1 { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; }
 .request-detail-heading p { margin-top: 2px; color: var(--muted); font-size: 11px; }
 .request-detail-heading .request-detail-eyebrow { margin: 0; color: var(--primary); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
-.request-detail-table-wrap { max-height: calc(100vh - 92px); overflow: auto; border-top: 1px solid var(--border); }
+.request-detail-table-wrap { max-height: calc(100vh - 120px); overflow: auto; border-top: 1px solid var(--border); }
 .request-detail-table { width: 100%; min-width: 720px; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
 .request-detail-table th { position: sticky; top: 0; z-index: 1; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--background); color: var(--muted); font-size: 10px; text-align: left; text-transform: uppercase; }
-.request-detail-table td { height: 42px; padding: 4px 10px; border-bottom: 1px solid var(--border); overflow: hidden; vertical-align: middle; }
+.request-detail-table td { height: 28px; padding: 0 10px; border-bottom: 1px solid var(--border); overflow: hidden; vertical-align: middle; }
 .request-detail-table tr:last-child td { border-bottom: 0; }
 .request-detail-table tr.failed { background: var(--failure); }
 .request-detail-table th:nth-child(1), .request-detail-table td:nth-child(1) { width: 70px; }
 .request-detail-table th:nth-child(2), .request-detail-table td:nth-child(2) { width: 80px; }
-.request-detail-table th:nth-child(4), .request-detail-table td:nth-child(4) { width: 100px; text-align: right; }
+.request-detail-table th:nth-child(4), .request-detail-table td:nth-child(4) { width: 78px; text-align: right; }
+.request-detail-table th:nth-child(5), .request-detail-table td:nth-child(5) { width: 90px; text-align: right; }
 .request-detail-status, .request-detail-time { font-variant-numeric: tabular-nums; }
 .request-detail-status { color: var(--muted); font-weight: 700; }
 .request-detail-method { color: var(--muted); font-weight: 700; }
-.request-detail-url-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
-.waterfall-track { position: relative; height: 10px; margin-top: 3px; overflow: hidden; border-radius: 2px; background: repeating-linear-gradient(to right, color-mix(in srgb, var(--border) 55%, transparent) 0 1px, transparent 1px 25%); }
-.waterfall-bar { position: absolute; top: 2px; bottom: 2px; min-width: 2px; border-radius: 2px; background: var(--primary); }
-.request-detail-table tr.failed .waterfall-bar { background: var(--danger); }
+.request-detail-table td.request-detail-url { padding-top: 0; padding-bottom: 0; }
+.waterfall-cell { position: relative; height: 28px; display: flex; align-items: center; isolation: isolate; }
+.request-detail-url-text { position: relative; z-index: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; padding: 0 6px; }
+.waterfall-track { position: absolute; inset: 0; overflow: hidden; background: repeating-linear-gradient(to right, color-mix(in srgb, var(--border) 40%, transparent) 0 1px, transparent 1px 25%); }
+.waterfall-bar { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--phase-color) 30%, transparent); border-inline-start: 1px solid color-mix(in srgb, var(--phase-color) 45%, transparent); }
+.phase-connection { --phase-color: #9163dc; }
+.phase-wait { --phase-color: #d69b19; }
+.phase-receive { --phase-color: #199c9a; }
+.phase-unknown { --phase-color: #84909e; }
+.request-detail-size { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.waterfall-legend { display: flex; flex-wrap: wrap; gap: 14px; padding: 0 14px 2px; color: var(--muted); font-size: 11px; }
+.waterfall-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.waterfall-legend i { width: 9px; height: 9px; border-radius: 2px; background: var(--phase-color); }
 .request-detail-empty { padding: 36px 12px; color: var(--muted); font-size: 12px; text-align: center; }
 .transaction-dialog { width: min(360px, calc(100vw - 24px)); padding: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); }
 .transaction-dialog::backdrop { background: rgb(0 0 0 / 45%); }

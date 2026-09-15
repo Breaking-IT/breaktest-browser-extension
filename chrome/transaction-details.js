@@ -109,6 +109,8 @@ function render() {
       || (left.ordinal ?? 0) - (right.ordinal ?? 0)
   ));
   requestRows.replaceChildren();
+  document.querySelector("#timing-unknown-legend").hidden = !sortedRequests.some(request =>
+    requestPhases(request).some(phase => phase.name === "unknown" && phase.time > 0));
   const completedCount = sortedRequests.length;
   const includedCount = transaction.requestCount ?? completedCount;
   const pendingCount = Math.max(includedCount - completedCount, 0);
@@ -160,17 +162,32 @@ function render() {
     const track = document.createElement("div");
     track.className = "waterfall-track";
     track.title = `${formatResponseTime(requestStart(request) - firstStart)} start · ${formatResponseTime(requestDuration(request))} response`;
-    const bar = document.createElement("span");
-    bar.className = "waterfall-bar";
-    const left = ((requestStart(request) - firstStart) / span) * 100;
-    const width = Math.max((requestDuration(request) / span) * 100, 0.8);
-    const barWidth = Math.min(width, 100);
-    bar.style.left = `${Math.min(left, 100 - barWidth)}%`;
-    bar.style.width = `${barWidth}%`;
-    track.append(bar);
-    url.append(urlText, track);
-
-    row.append(status, method, url, responseTime);
+    const phases = requestPhases(request);
+    let offset = requestStart(request) - firstStart;
+    for (const phase of phases) {
+      if (phase.time <= 0) continue;
+      const bar = document.createElement("span");
+      bar.className = `waterfall-bar phase-${phase.name}`;
+      bar.style.left = `${Math.min(offset / span * 100, 100)}%`;
+      bar.style.width = `${Math.min(phase.time / span * 100, 100)}%`;
+      track.append(bar);
+      offset += phase.time;
+    }
+    const timingDescription = phases.map(phase => `${phase.label}: ${formatResponseTime(phase.time)}`).join(" · ");
+    url.title = `${request.url || ""}\n${track.title}\n${timingDescription}`;
+    urlText.title = url.title;
+    track.setAttribute("aria-hidden", "true");
+    const waterfall = document.createElement("div");
+    waterfall.className = "waterfall-cell";
+    waterfall.append(track, urlText);
+    url.append(waterfall);
+    const size = document.createElement("td");
+    size.className = "request-detail-size";
+    size.textContent = formatSize(request.size);
+    size.title = Number.isFinite(request.size) && request.size >= 0
+      ? `${request.size.toLocaleString()} recorded response bytes (1 KB = 1,000 bytes)`
+      : "Response size unavailable";
+    row.append(status, method, url, size, responseTime);
     rows.append(row);
   }
   requestRows.append(rows);
@@ -201,4 +218,27 @@ function formatResponseTime(milliseconds) {
     return `${Math.round(milliseconds)} ms`;
   }
   return `${(milliseconds / 1000).toFixed(milliseconds < 10_000 ? 2 : 1)} s`;
+}
+
+function formatSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  return (bytes / 1000).toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 1});
+}
+
+function requestPhases(request) {
+  const total = requestDuration(request);
+  const timings = request.timings;
+  const known = value => Number.isFinite(value) && value >= 0 ? value : 0;
+  if (!timings) return [{name: "unknown", label: "Total duration only; the browser did not provide a timing breakdown", time: total}];
+  // HAR connect already includes TLS. Do not add ssl a second time.
+  const phases = [
+    {name: "connection", label: "Connection / sending (including queue and DNS)", time: [timings.blocked, timings.dns, timings.connect, timings.send].reduce((sum, value) => sum + known(value), 0)},
+    {name: "wait", label: request.timingSource === "response-events" ? "Before response (connection and waiting combined)" : "Waiting", time: known(timings.wait)},
+    {name: "receive", label: "Receiving", time: known(timings.receive)}
+  ];
+  const sum = phases.reduce((value, phase) => value + phase.time, 0);
+  // Roundoff or browser estimates must not draw past the request's end.
+  if (sum > total && sum > 0) phases.forEach(phase => { phase.time *= total / sum; });
+  if (sum < total) phases.push({name: "unknown", label: "Time not attributed to a phase by the browser", time: total - sum});
+  return phases;
 }

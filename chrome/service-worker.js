@@ -494,7 +494,10 @@ function transactionDetails(id) {
       status: entry.response.status,
       failed: entry._breaktest.failed,
       startedDateTime: entry.startedDateTime,
-      time: entry.time
+      time: entry.time,
+      size: entry.response.bodySize,
+      timingSource: entry._breaktest.timingSource,
+      timings: entry._breaktest.timingsAvailable === false ? null : entry.timings
     }));
   return {ok: true, transaction, requests};
 }
@@ -946,6 +949,8 @@ function finalizeRequest(state, finishedTimestamp) {
       bodyTruncated: state.bodyTruncated,
       bodyUnavailable: Boolean(state.bodyUnavailable),
       bodyUnavailableReason: state.bodyUnavailableReason || "",
+      timingSource: state.timing ? "network" : "response-events",
+      timingsAvailable: Boolean(state.timing) || Number.isFinite(state.responseTimestamp),
       requestBodyUnavailable: Boolean(state.requestBodyUnavailable),
       failed: state.failed,
       incomplete: state.incomplete,
@@ -967,6 +972,8 @@ function finalizeRequest(state, finishedTimestamp) {
     status: state.response.status,
     resourceType: state.resourceType,
     size: state.response.bodySize,
+    timingSource: entry._breaktest.timingSource,
+    timings: entry._breaktest.timingsAvailable === false ? null : entry.timings,
     startedDateTime: state.startedDateTime,
     time: totalMs,
     failed: state.failed,
@@ -1009,7 +1016,10 @@ function buildHar(session) {
 function buildTimings(state, totalMs) {
   const timing = state.timing;
   if (!timing) {
-    return {blocked: 0, dns: -1, connect: -1, ssl: -1, send: 0, wait: totalMs, receive: 0};
+    const beforeResponse = Number.isFinite(state.responseTimestamp)
+      ? Math.min(Math.max((state.responseTimestamp - state.requestTimestamp) * 1000, 0), totalMs)
+      : totalMs;
+    return {blocked: 0, dns: -1, connect: -1, ssl: -1, send: 0, wait: beforeResponse, receive: totalMs - beforeResponse};
   }
   const dns = duration(timing.dnsStart, timing.dnsEnd);
   const connect = duration(timing.connectStart, timing.connectEnd);

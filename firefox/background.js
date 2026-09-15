@@ -311,7 +311,9 @@ function transactionDetails(id) {
       status: entry.response.status,
       failed: entry._breaktest.failed,
       startedDateTime: entry.startedDateTime,
-      time: entry.time
+      time: entry.time,
+      size: entry.response.bodySize,
+      timings: entry._breaktest.timingsAvailable === false ? null : entry.timings
     }));
   return {ok: true, transaction, requests};
 }
@@ -654,6 +656,7 @@ function finalizeRequest(owner, state, finishedAt) {
     status: state.response.status,
     resourceType: state.resourceType,
     size: state.response.bodySize,
+    timings: entry._breaktest.timingsAvailable === false ? null : entry.timings,
     startedDateTime: state.startedDateTime,
     time: totalMs,
     failed: state.failed,
