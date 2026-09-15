@@ -235,3 +235,39 @@ redact HAR files before sharing them or committing them to source control.
 
 The recorder processes and exports data locally. It does not upload recordings
 to a BreakTest service.
+
+## Uploaded file content
+
+While recording, the extension reads files selected in file inputs, dropped into
+the recorded tab, or observed in a DOM `formdata` event. Existing file selections
+are also captured when recording starts. This includes files selected but never
+submitted. File bytes stay local and are included in the exported HAR at
+`log._breaktest.uploadCapture.files`.
+
+Each record contains `fileName`, `mimeType`, `size` (original byte count),
+`fieldName`, `source`, `pageUrl`, `frameId`, `transactionId` (when available),
+`capturedDateTime`, and `status`. A complete record has `encoding: "base64"` and
+`content`: decode that string as base64 to recover the exact original file,
+including binary files and empty files. An unavailable record has a `reason`
+and no `content`. The original network request body is not rewritten.
+
+Capture is limited to 20 MiB per file, 64 MiB total original file bytes per
+recording, and 1,000 file records. The HAR reports size-limit failures,
+interrupted reads/transfers, and the file-count limit explicitly. Export waits
+up to five seconds for transfers already accepted by the recorder. Navigation
+can interrupt a transfer. Same-file observations may appear more than once if
+the browser supplies different File objects; filenames are not unique IDs.
+
+This is a file inventory, not a claim that a file was sent or a mapping to an
+HTTP request. Importers must explicitly support this custom field; existing
+HAR consumers can ignore it. It does not capture arbitrary programmatically
+created fetch/XHR Blob bodies, worker-generated files, inaccessible closed
+shadow roots, or files on pages where the browser blocks content scripts.
+A `formdata` event on a detached form is also outside the document listener.
+Select/drop the original file again during a new recording to recover content
+that was absent from an older HAR.
+
+The `scripting` and host permissions let the isolated content script read files
+in the recorded tab and its accessible frames. It asks the background recorder
+whether that tab is recording before reading any bytes, and does not send file
+contents to the page or any external service.

@@ -8,6 +8,7 @@ const vm = require("node:vm");
 const listener = () => ({addListener() {}});
 const context = {
   console,
+  crypto: require("node:crypto").webcrypto,
   URL,
   URLSearchParams,
   Blob,
@@ -71,6 +72,7 @@ context.chrome = {
 };
 
 vm.createContext(context);
+vm.runInContext(fs.readFileSync(path.resolve(__dirname, "../chrome/upload-store.js"), "utf8"), context);
 const workerPath = path.resolve(__dirname, "../chrome/service-worker.js");
 vm.runInContext(fs.readFileSync(workerPath, "utf8"), context);
 

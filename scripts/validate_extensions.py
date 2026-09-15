@@ -51,6 +51,8 @@ def referenced_manifest_files(manifest: dict) -> set[str]:
     if background.get("service_worker"):
         files.add(background["service_worker"])
     files.update(background.get("scripts", []))
+    for script in manifest.get("content_scripts", []):
+        files.update(script.get("js", []))
 
     for key in ("icons",):
         files.update(manifest.get(key, {}).values())
@@ -171,8 +173,8 @@ def validate() -> list[str]:
             errors.append(f"{browser}: recorder start actions do not enforce consent")
         if 'RECORDING_CONSENT_KEY = "recordingDisclosureAcceptedVersion"' not in panel_script:
             errors.append(f"{browser}: accepted disclosure version is not stored")
-        if "RECORDING_DISCLOSURE_VERSION = 2" not in panel_script:
-            errors.append(f"{browser}: recording disclosure version must cover IndexedDB export retention")
+        if "RECORDING_DISCLOSURE_VERSION = 3" not in panel_script:
+            errors.append(f"{browser}: recording disclosure version must cover selected file content capture")
         if "function showPrivacySettings()" not in panel_script or "privacy-settings-button" not in panel:
             errors.append(f"{browser}: saved consent cannot be reviewed from the recorder")
         if "consentVersion: RECORDING_DISCLOSURE_VERSION" not in panel_script:
@@ -251,7 +253,7 @@ def validate() -> list[str]:
         errors.append("chrome: a manifest-level side panel would make the recorder global")
 
     firefox_background_scripts = manifests["firefox"].get("background", {}).get("scripts", [])
-    if firefox_background_scripts[:2] != ["har-export-store.js", "background.js"]:
+    if firefox_background_scripts[:3] != ["har-export-store.js", "upload-store.js", "background.js"]:
         errors.append("firefox: IndexedDB HAR export support must load before the recorder background")
 
     if not (ROOT / "PRIVACY.md").is_file():
@@ -271,6 +273,15 @@ def validate() -> list[str]:
             "Chrome request metadata ordering tests failed:\n"
             f"{metadata_test.stderr.strip() or metadata_test.stdout.strip()}"
         )
+    upload_test = subprocess.run(
+        ["node", str(ROOT / "scripts" / "test_upload_capture.js")],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    if upload_test.returncode:
+        errors.append(f"Upload capture tests failed:\n{upload_test.stderr or upload_test.stdout}")
+    for filename in ("upload-store.js", "upload-capture.js"):
+        if (ROOT / "chrome" / filename).read_bytes() != (ROOT / "firefox" / filename).read_bytes():
+            errors.append(f"Upload capture sources differ between browsers: {filename}")
     return errors
 
 

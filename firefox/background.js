@@ -12,6 +12,7 @@ const CACHE_OVERRIDE_KEY = "firefoxCacheOverrideActive";
 const REQUEST_FILTER = {urls: ["http://*/*", "https://*/*"]};
 
 let recording = null;
+
 const uiPorts = new Set();
 const cacheRecovery = recoverStaleCacheOverride();
 
@@ -27,7 +28,7 @@ browser.runtime.onConnect.addListener(port => {
   port.onDisconnect.addListener(() => uiPorts.delete(port));
 });
 
-browser.runtime.onMessage.addListener(message => handleMessage(message));
+browser.runtime.onMessage.addListener((message, sender) => handleMessage(message, sender));
 
 browser.tabs.onRemoved.addListener(tabId => {
   if (!recording || recording.tabId !== tabId || recording.stopping) {
@@ -62,7 +63,10 @@ browser.webRequest.onBeforeRedirect.addListener(beforeRedirect, REQUEST_FILTER);
 browser.webRequest.onCompleted.addListener(completed, REQUEST_FILTER);
 browser.webRequest.onErrorOccurred.addListener(failed, REQUEST_FILTER);
 
-async function handleMessage(message) {
+async function handleMessage(message, sender = {}) {
+  if (message?.type?.startsWith("upload-")) {
+    return globalThis.UploadStore.handle(recording, message, sender);
+  }
   switch (message?.type) {
     case "start-recording":
       return startRecording(message);
@@ -139,6 +143,7 @@ async function startRecording(message) {
     nextEntryOrdinal: 0
   };
   startTransactionInternal(transactionName);
+  await globalThis.UploadStore.install(browser, recording);
 
   try {
     if (startUrl) {
@@ -231,6 +236,7 @@ function deleteTransaction(id, requestDisposition = "delete") {
     throw new Error(`There is no ${requestDisposition} transaction`);
   }
 
+  globalThis.UploadStore.removeTransaction(recording, id, targetTransaction?.id);
   recording.transactions = recording.transactions.filter(item => item.id !== id);
   if (targetTransaction) {
     targetTransaction.requestCount += transaction.requestCount;
@@ -315,6 +321,7 @@ async function stopRecording() {
     throw new Error("No recording is active");
   }
   recording.stopping = true;
+  await globalThis.UploadStore.settle(recording);
   const owner = recording;
   for (const state of [...owner.pendingStates]) {
     state.incomplete = !state.requestDone;
@@ -705,6 +712,7 @@ function buildHar(owner) {
         startedDateTime: new Date(owner.startedAt).toISOString(),
         tabTitle: owner.tabTitle,
         cacheDisabled: owner.disableCache,
+        uploadCapture: globalThis.UploadStore.exportFiles(owner),
         transactions: owner.transactions
       }
     }

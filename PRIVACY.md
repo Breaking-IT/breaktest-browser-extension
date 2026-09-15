@@ -1,6 +1,6 @@
 # BreakTest Browser Recorder Privacy Policy
 
-Effective date: July 20, 2026
+Effective date: September 11, 2026
 
 This policy describes how the BreakTest Browser Recorder extensions for
 Chrome, Microsoft Edge, and Firefox process information.
@@ -21,6 +21,8 @@ the browser tab you selected:
 - request and response headers, which may include cookies, authorization
   headers, session tokens, and other authentication information;
 - request and response bodies, including form submissions and website content;
+- contents and metadata of files selected, dropped, or observed in form submissions
+  in the recorded tab, including files selected but never submitted;
 - the selected tab's title and basic recording state; and
 - transaction names, the optional Start URL, and the cache preference you
   enter in the recorder.
@@ -47,7 +49,12 @@ secondary purpose.
 Active recording data is kept in extension memory until you finish or discard
 the recording, close the recorded tab, reload or remove the extension, or the
 browser terminates the extension process. The recorder retains at most 2 MiB
-of body text for each response and marks larger bodies as truncated.
+of body text for each response and marks larger bodies as truncated. File capture
+is limited to 20 MiB per file, 64 MiB total file bytes, and 1,000 file records per
+recording. Files are embedded as base64 in the HAR; incomplete or oversized
+files are marked unavailable. Content scripts check for an active recording in
+the selected tab before reading file bytes. Existing file selections are included
+when recording starts. Selected files may never actually be uploaded.
 
 When you finish a recording, the extension serializes the completed HAR into a
 Blob in browser-local IndexedDB before opening the Save As dialog. This avoids

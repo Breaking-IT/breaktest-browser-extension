@@ -7,6 +7,7 @@
  */
 
 importScripts("har-export-store.js");
+importScripts("upload-store.js");
 
 const PROTOCOL_VERSION = "1.3";
 const MAX_BODY_CHARS = 2 * 1024 * 1024;
@@ -15,9 +16,10 @@ const NETWORK_RESOURCE_BUFFER_BYTES = 24 * 1024 * 1024;
 const MAX_VISIBLE_REQUESTS = 1000;
 const SIDE_PANEL_PATH = "sidepanel.html";
 const INCOGNITO_LAUNCH_KEY = "pendingIncognitoLaunch";
-const RECORDING_DISCLOSURE_VERSION = 2;
+const RECORDING_DISCLOSURE_VERSION = 3;
 
 let recording = null;
+
 
 chrome.runtime.onInstalled.addListener(() => {
   configureExistingTabPanels().catch(error => console.error(error));
@@ -44,7 +46,7 @@ configureExistingTabPanels().catch(error => console.error(error));
 globalThis.HarExportStore.cleanupStale().catch(error => console.error(error));
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  handleMessage(message)
+  handleMessage(message, _sender)
     .then(sendResponse)
     .catch(error => sendResponse({ok: false, error: errorMessage(error)}));
   return true;
@@ -78,7 +80,10 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   trackTask(task);
 });
 
-async function handleMessage(message) {
+async function handleMessage(message, sender = {}) {
+  if (message?.type?.startsWith("upload-")) {
+    return globalThis.UploadStore.handle(recording, message, sender);
+  }
   switch (message?.type) {
     case "start-recording":
       return startRecording(message);
@@ -207,6 +212,7 @@ async function startRecording(message) {
     nextEntryOrdinal: 0
   };
   startTransactionInternal(transactionName);
+  await globalThis.UploadStore.install(chrome, recording);
 
   try {
     await chrome.debugger.attach({tabId}, PROTOCOL_VERSION);
@@ -402,6 +408,7 @@ function deleteTransaction(id, requestDisposition = "delete") {
     throw new Error(`There is no ${requestDisposition} transaction`);
   }
 
+  globalThis.UploadStore.removeTransaction(recording, id, targetTransaction?.id);
   recording.transactions = recording.transactions.filter(item => item.id !== id);
   if (targetTransaction) {
     targetTransaction.requestCount += transaction.requestCount;
@@ -488,6 +495,7 @@ async function stopRecording() {
     throw new Error("No recording is active");
   }
   recording.stopping = true;
+  await globalThis.UploadStore.settle(recording);
   await settlePendingTasks();
 
   for (const state of recording.activeRequests.values()) {
@@ -982,6 +990,7 @@ function buildHar(session) {
         recordedWith: "chrome.debugger",
         startedDateTime: new Date(session.startedAt).toISOString(),
         tabTitle: session.tabTitle,
+        uploadCapture: globalThis.UploadStore.exportFiles(session),
         transactions: session.transactions
       }
     }
