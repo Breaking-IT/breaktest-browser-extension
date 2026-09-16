@@ -997,6 +997,7 @@ function finalizeRequest(state, finishedTimestamp) {
 }
 
 function buildHar(session) {
+  const uploadCapture = globalThis.UploadStore.exportFiles(session);
   const entries = [...session.entries].sort((left, right) => {
     const timeDifference = Date.parse(left.startedDateTime) - Date.parse(right.startedDateTime);
     return timeDifference || left._breaktest.entryOrdinal - right._breaktest.entryOrdinal;
@@ -1015,7 +1016,7 @@ function buildHar(session) {
         recordedWith: "chrome.debugger",
         startedDateTime: new Date(session.startedAt).toISOString(),
         tabTitle: session.tabTitle,
-        uploadCapture: globalThis.UploadStore.exportFiles(session),
+        ...(uploadCapture ? {uploadCapture} : {}),
         transactions: session.transactions
       }
     }

@@ -137,6 +137,7 @@ globalThis.UploadStore = (() => {
 
   function exportFiles(owner) {
     const capture = owner.uploadCapture;
+    if (!capture?.files.length) return undefined;
     return {
       version: 1, files: capture?.files || [],
       maxFileBytes: MAX_FILE_BYTES, maxTotalBytes: MAX_TOTAL_BYTES,

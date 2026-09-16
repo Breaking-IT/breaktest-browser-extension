@@ -9,10 +9,22 @@ async function test(browser) {
   const context = vm.createContext({crypto, setTimeout, clearTimeout});
   vm.runInContext(fs.readFileSync(path.join(__dirname, "..", browser, "upload-store.js"), "utf8"), context);
   const store = context.UploadStore;
+  const worker = fs.readFileSync(path.join(__dirname, "..", browser,
+    browser === "chrome" ? "service-worker.js" : "background.js"), "utf8");
+  const start = worker.indexOf("function buildHar(");
+  context[browser === "chrome" ? "chrome" : "browser"] = {runtime: {getManifest: () => ({version: "test"})}};
+  vm.runInContext(worker.slice(start, worker.indexOf("\nfunction ", start + 1)), context);
+  function assertNoUploadSection(owner) {
+    const har = context.buildHar({...owner, entries: [], startedAt: 0, transactions: []});
+    assert.equal(Object.hasOwn(har.log._breaktest, "uploadCapture"), false);
+    assert.equal(JSON.stringify(har).includes('"uploadCapture"'), false);
+  }
+  assertNoUploadSection({});
   let owner = {tabId: 7, currentTransaction: {id: "t1"}};
   const sender = {tab: {id: 7}, frameId: 3, documentId: "doc1", url: "https://example.test/form"};
   const send = message => store.handle(owner, message, sender);
   const token = send({type: "upload-status"}).token;
+  assertNoUploadSection(owner);
   const begin = (size, name = "recording.har") => send({type: "upload-begin", token,
     file: {name, size, mimeType: "application/json", fieldName: "attachment", source: "input"}});
   const body = Buffer.from('{"log":{"entries":[]},"unicode":"é😀"}');
@@ -116,7 +128,8 @@ async function test(browser) {
   store.removeTransaction(owner, "old", "new");
   assert.ok(store.exportFiles(owner).files.every(item => item.transactionId === "new"));
   store.removeTransaction(owner, "new");
-  assert.equal(store.exportFiles(owner).files.length, 0);
+  assert.equal(store.exportFiles(owner), undefined);
+  assertNoUploadSection(owner);
   assert.equal(owner.uploadCapture.transfers.size, 0);
   owner = null;
   assert.equal(send({type: "upload-status"}).ok, false);

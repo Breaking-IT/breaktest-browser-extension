@@ -705,6 +705,7 @@ function buildTimings(state, totalMs) {
 }
 
 function buildHar(owner) {
+  const uploadCapture = globalThis.UploadStore.exportFiles(owner);
   const entries = [...owner.entries].sort((left, right) => {
     const timeDifference = Date.parse(left.startedDateTime) - Date.parse(right.startedDateTime);
     return timeDifference || left._breaktest.entryOrdinal - right._breaktest.entryOrdinal;
@@ -724,7 +725,7 @@ function buildHar(owner) {
         startedDateTime: new Date(owner.startedAt).toISOString(),
         tabTitle: owner.tabTitle,
         cacheDisabled: owner.disableCache,
-        uploadCapture: globalThis.UploadStore.exportFiles(owner),
+        ...(uploadCapture ? {uploadCapture} : {}),
         transactions: owner.transactions
       }
     }
