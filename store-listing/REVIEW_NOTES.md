@@ -10,18 +10,26 @@ recording and export flow.
 
 ## Test steps
 
-1. Install the submitted extension and open **BreakTest Browser Recorder** from
-   its toolbar action.
-2. Enter `https://example.com/` as the Start URL.
+1. Install the submitted extension, visit `https://example.com/`, and open
+   **BreakTest Browser Recorder** from its toolbar action.
+2. Keep the initial transaction name or replace it.
 3. Review the recording-data notice and select **I understand and want to
-   record this traffic**. The notice collapses after acceptance and can be
-   reopened from **Privacy & settings**.
-4. Choose **Start in new tab**.
-5. Wait for the document request to appear under **Live requests**.
-6. Change the transaction name to `02_ExampleNavigation`, move the pointer out
-   of the field, and navigate or reload the test page.
-7. Choose **Finish and export**, then choose a filename and folder in the
-   browser's native Save As dialog.
+   record this traffic**. It can be reopened from **Privacy & settings**.
+4. Choose **Start recording here**. The page is not reloaded automatically.
+5. Reload the page manually and wait for requests under **Live requests**.
+6. Click the arrow beside the transaction name. Complete the suggested `02_`
+   prefix and confirm **Start transaction**, then navigate or reload.
+7. Click a transaction to inspect response sizes and the timing waterfall.
+8. Switch to another tab. Use **Go to recording tab** or Command+Shift+9
+   (Ctrl+Shift+9 on Windows/Linux) to return to the recording.
+9. Choose **Finish and export**, then choose a filename and folder.
+
+Optional file-capture check: on a trusted test page containing a file input,
+select a small non-sensitive file during recording. Its bytes are base64 in
+`log._breaktest.uploadCapture.files` after export, even if not submitted. This
+is a custom HAR extension, not a guaranteed request-to-file mapping. Files over
+20 MiB or beyond the 64 MiB recording limit are marked unavailable. No upload
+section is exported when no files were captured.
 
 No account, remote service, license key, payment, or test credentials are
 required.
@@ -57,12 +65,11 @@ consent, does not inspect other tabs, and detaches when recording finishes.
 Opening Chrome or Edge DevTools on the same tab can detach the recorder because
 the browser permits only one debugger client.
 
-The Chrome/Edge side panel is configured per tab. It is hidden when another
-tab is selected and is transferred to the newly created tab when **Start in
-new tab** is used.
+The Chrome/Edge side panel is configured per tab. The REC toolbar badge is
+shown only on the recorded tab. The locator selects the tab and focuses its
+window without changing the recording.
 
-Incognito access is optional. If enabled by the reviewer, **Start in incognito
-window** opens a launcher in a new private window and requires one browser-
+Incognito access is optional. If enabled by the reviewer, **Start in incognito** opens a launcher in a new private window and requires one browser-
 mandated click before the side panel opens. That same launcher tab is changed
 to `about:blank`, attached to the recorder, and then navigated to the Start URL
 so the tab-specific panel remains visible.
@@ -85,3 +92,11 @@ no separate source-code archive is required.
   stages completed HAR exports for download and retry.
 - Firefox sidebars are window-wide by browser design and therefore remain
   visible across tabs in the same window.
+
+## New permissions in 1.2.0
+
+`scripting` and Chrome host access support packaged isolated-world upload
+capture. Content scripts may load on HTTP/HTTPS sites, but read file bytes only
+when the background authorizes capture for the user-selected recording tab.
+Selected files may never be submitted; the disclosure explicitly states this.
+Captured bytes remain local. The recording notice version is incremented.
