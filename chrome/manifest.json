@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "BreakTest Browser Recorder",
   "description": "Record a browser session as HAR with named BreakTest transactions.",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "author": "Breaking IT",
   "homepage_url": "https://github.com/Breaking-IT/breaktest-browser-extension",
   "minimum_chrome_version": "118",
@@ -12,7 +12,8 @@
     "downloads",
     "sidePanel",
     "storage",
-    "tabs"
+    "tabs",
+    "scripting"
   ],
   "background": {
     "service_worker": "service-worker.js"
@@ -30,6 +31,32 @@
       "32": "icons/icon32.png",
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
+    }
+  },
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "upload-capture.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ],
+  "commands": {
+    "focus-recording-tab": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+9",
+        "mac": "Command+Shift+9"
+      },
+      "description": "Go to the recording tab"
     }
   }
 }

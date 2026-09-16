@@ -31,17 +31,13 @@ Firefox removes temporary add-ons when the browser exits. Repeat these steps
 after restarting Firefox. Changes to the extension source also require using
 **Reload** beside the extension on the `about:debugging` page.
 
-## Record from the first homepage request
+## Start recording
 
-1. Open the recorder from its toolbar icon or Firefox sidebar.
-2. Enter the **Start URL**.
-3. Keep `01_OpenHomepage` as the initial transaction name, or replace it.
-4. Optionally select **Disable browser cache while recording**.
-5. Choose **Start in new tab**.
-
-The extension creates a new tab, activates capture, and then navigates to the
-Start URL. **Start current tab** only captures requests that begin after the
-recorder starts; it cannot recover the page's original load.
+Open the page and recorder sidebar, choose the initial transaction name, and
+click **Start recording here**. The current page is not reloaded or navigated.
+Reload it manually after starting if you want to capture its initial load.
+For a fresh private window, enter the **Incognito start URL** and click
+**Start in incognito**. The URL field applies only to the private-window action.
 
 The cache option is off by default. Firefox exposes cache control as a global
 browser setting, so selecting it temporarily disables the cache for all
@@ -51,10 +47,13 @@ HTTP cache, so use this option when that distinction matters.
 
 ## Name and export transactions
 
-The transaction field is the name assigned to new requests. Type the next name,
-then move the pointer toward the action that should start that transaction. The
-name is committed after typing stops; requests already in progress keep their
-original transaction.
+The transaction field shows the current transaction. Click **→** on its right
+to open **Next transaction**. `01_Openhomepage` suggests `02_`, and
+`UC1_01_Homepage` suggests `UC1_02_`; leading zeros and the prefix are preserved.
+Names without a numeric counter start at `01_`. Enter a description and press
+Enter or **Start transaction**. Cancel or Escape leaves the current transaction
+unchanged. Requests stay in the current transaction until confirmation, and
+requests already in progress retain their original transaction.
 
 Use the edit icon in the Transactions list to rename a transaction and update
 all requests already assigned to it. Use the × button to remove an earlier
@@ -109,9 +108,55 @@ until the last private window closes.
 ## Troubleshooting
 
 If an internal Firefox page cannot be recorded, enter an HTTP or HTTPS Start
-URL and use **Start in new tab**. If the private launcher cannot start, verify
+URL and use **Start in incognito**. If the private launcher cannot start, verify
 **Run in Private Windows** is allowed, close the private window, reload the
 temporary add-on, and try again.
 
 HAR files may contain credentials, cookies, tokens, personal data, and response
 content. Record only authorized systems and review files before sharing them.
+
+## Uploaded file content
+
+While recording, the extension reads files selected in file inputs, dropped into
+the recorded tab, or observed in a DOM `formdata` event. Existing file selections
+are also captured when recording starts. This includes files selected but never
+submitted. File bytes stay local and are included in the exported HAR at
+`log._breaktest.uploadCapture.files`.
+
+Each record contains `fileName`, `mimeType`, `size` (original byte count),
+`fieldName`, `source`, `pageUrl`, `frameId`, `transactionId` (when available),
+`capturedDateTime`, and `status`. A complete record has `encoding: "base64"` and
+`content`: decode that string as base64 to recover the exact original file,
+including binary files and empty files. An unavailable record has a `reason`
+and no `content`. The original network request body is not rewritten.
+
+Capture is limited to 20 MiB per file, 64 MiB total original file bytes per
+recording, and 1,000 file records. The HAR reports size-limit failures,
+interrupted reads/transfers, and the file-count limit explicitly. Export waits
+up to five seconds for transfers already accepted by the recorder. Navigation
+can interrupt a transfer. Same-file observations may appear more than once if
+the browser supplies different File objects; filenames are not unique IDs.
+
+This is a file inventory, not a claim that a file was sent or a mapping to an
+HTTP request. Importers must explicitly support this custom field; existing
+HAR consumers can ignore it. It does not capture arbitrary programmatically
+created fetch/XHR Blob bodies, worker-generated files, inaccessible closed
+shadow roots, or files on pages where the browser blocks content scripts.
+A `formdata` event on a detached form is also outside the document listener.
+Select/drop the original file again during a new recording to recover content
+that was absent from an older HAR.
+
+The `scripting` and host permissions let the isolated content script read files
+in the recorded tab and its accessible frames. It asks the background recorder
+whether that tab is recording before reading any bytes, and does not send file
+contents to the page or any external service.
+
+## Find the recording tab
+
+Click **Go to recording tab** in the recorder, or press **Command+Shift+9** on
+macOS (**Ctrl+Shift+9** on Windows/Linux). This selects the recorded tab and
+focuses its window, including an incognito recording. If multiple recording
+contexts exist, the current context's recording is preferred, then the most
+recent one. Chrome's shortcut can be reassigned at `chrome://extensions/shortcuts`
+if another extension already uses it. Pin the extension to see the red **REC**
+badge, which now appears only when the recorded tab is selected.

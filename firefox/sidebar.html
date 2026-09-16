@@ -23,9 +23,10 @@
   </header>
 
   <main>
+    <button id="focus-recording-tab" type="button" title="Select the recorded tab and bring its window forward">↗ Go to recording tab</button>
     <section class="card controls">
       <div id="start-setup" class="start-setup">
-        <label for="start-url">Start URL <span class="optional">optional</span></label>
+        <label for="start-url">Incognito start URL <span class="optional">optional</span></label>
         <div class="control-row">
           <input id="start-url" type="url" placeholder="https://application.example/" maxlength="2048">
         </div>
@@ -33,11 +34,12 @@
       <label for="transaction-name">Transaction name</label>
       <div class="control-row">
         <input id="transaction-name" type="text" value="01_OpenHomepage" maxlength="120">
+        <button id="next-transaction-button" type="button" title="Next transaction" aria-label="Next transaction" disabled>→</button>
       </div>
       <div id="start-actions" class="start-actions">
         <div id="recording-disclosure" class="privacy-disclosure" role="note">
           <strong>Recording data</strong>
-          <p id="recording-disclosure-text">Captures URLs, headers, cookies, and request and response bodies from the selected tab. A completed HAR stays in this browser until saved or discarded and is cleaned up after 24 hours.</p>
+          <p id="recording-disclosure-text">Captures URLs, headers, cookies, and request and response bodies from the selected tab. Includes contents of files selected or dropped in the tab, even if not submitted. A completed HAR stays in this browser until saved or discarded and is cleaned up after 24 hours.</p>
           <label class="checkbox-option consent-option" for="recording-consent">
             <input id="recording-consent" type="checkbox" aria-describedby="recording-disclosure-text">
             I understand and want to record this traffic
@@ -52,13 +54,10 @@
           Disable browser cache while recording
         </label>
         <div class="control-row start-controls">
-          <button id="blank-start-button" class="primary" disabled>Start in new tab</button>
-          <button id="start-button" disabled>Start current tab</button>
+          <button id="start-button" class="primary" disabled>Start recording here</button>
+          <button id="private-start-button" class="private" disabled>Start in incognito</button>
         </div>
-        <div class="control-row">
-          <button id="private-start-button" class="private" disabled>Start in private window</button>
-        </div>
-        <p class="hint">The recorder starts before opening the Start URL. New session cookies remain enabled so login flows work.</p>
+        <p class="hint">Start recording here keeps the current page. The start URL is used only for incognito recording.</p>
         <div id="privacy-summary" class="privacy-summary" hidden>
           <span>Recording consent saved</span>
           <button id="privacy-settings-button" class="quiet" type="button">Privacy &amp; settings</button>
@@ -68,7 +67,7 @@
         <button id="stop-button" class="danger" disabled hidden>Finish and export</button>
         <button id="discard-button" disabled hidden>Cancel recording</button>
       </div>
-      <p id="transaction-hint" class="hint" hidden>Type the next transaction name, then move the pointer toward the action you want to record. The new name is applied after typing stops.</p>
+      <p id="transaction-hint" class="hint" hidden>Use → to name and start the next transaction. Recording continues in the current transaction until you confirm.</p>
     </section>
 
     <section class="stats" aria-label="Recording totals">
@@ -94,6 +93,19 @@
       HAR recordings can contain credentials, cookies, tokens and personal data. Review them before sharing.
     </section>
   </main>
+
+  <dialog id="next-transaction-dialog" class="transaction-dialog" aria-labelledby="next-transaction-title">
+    <form id="next-transaction-form" class="transaction-dialog-content">
+      <h2 id="next-transaction-title">Next transaction</h2>
+      <label for="next-transaction-input">Transaction name</label>
+      <input id="next-transaction-input" type="text" maxlength="120" required autocomplete="off">
+      <p id="next-transaction-error" role="alert" hidden></p>
+      <div class="control-row">
+        <button id="cancel-next-transaction" type="button">Cancel</button>
+        <button id="confirm-next-transaction" class="primary" type="submit">Start transaction</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="remove-transaction-dialog" class="transaction-dialog" aria-labelledby="remove-transaction-title">
     <div class="transaction-dialog-content">

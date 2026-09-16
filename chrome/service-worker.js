@@ -7,6 +7,7 @@
  */
 
 importScripts("har-export-store.js");
+importScripts("upload-store.js");
 
 const PROTOCOL_VERSION = "1.3";
 const MAX_BODY_CHARS = 2 * 1024 * 1024;
@@ -15,9 +16,17 @@ const NETWORK_RESOURCE_BUFFER_BYTES = 24 * 1024 * 1024;
 const MAX_VISIBLE_REQUESTS = 1000;
 const SIDE_PANEL_PATH = "sidepanel.html";
 const INCOGNITO_LAUNCH_KEY = "pendingIncognitoLaunch";
-const RECORDING_DISCLOSURE_VERSION = 2;
+const RECORDING_DISCLOSURE_VERSION = 3;
 
 let recording = null;
+const RECORDING_LOCATOR_KEY = chrome.extension.inIncognitoContext ? "recordingLocatorPrivate" : "recordingLocatorNormal";
+// Clear this background context's stale locator after an extension/browser restart.
+let locatorWrites = chrome.storage.local.remove(RECORDING_LOCATOR_KEY).catch(() => {});
+chrome.commands.onCommand.addListener(command => {
+  if (command === "focus-recording-tab") {
+    focusRecordingTab().catch(error => notify("recorder-warning", {message: errorMessage(error)}));
+  }
+});
 
 chrome.runtime.onInstalled.addListener(() => {
   configureExistingTabPanels().catch(error => console.error(error));
@@ -44,7 +53,7 @@ configureExistingTabPanels().catch(error => console.error(error));
 globalThis.HarExportStore.cleanupStale().catch(error => console.error(error));
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  handleMessage(message)
+  handleMessage(message, _sender)
     .then(sendResponse)
     .catch(error => sendResponse({ok: false, error: errorMessage(error)}));
   return true;
@@ -78,7 +87,10 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   trackTask(task);
 });
 
-async function handleMessage(message) {
+async function handleMessage(message, sender = {}) {
+  if (message?.type?.startsWith("upload-")) {
+    return globalThis.UploadStore.handle(recording, message, sender);
+  }
   switch (message?.type) {
     case "start-recording":
       return startRecording(message);
@@ -96,6 +108,8 @@ async function handleMessage(message) {
       return stopRecording();
     case "cancel-recording":
       return cancelRecording();
+    case "focus-recording-tab":
+      return focusRecordingTab();
     case "recorder-status":
       return recorderStatus();
     default:
@@ -207,6 +221,7 @@ async function startRecording(message) {
     nextEntryOrdinal: 0
   };
   startTransactionInternal(transactionName);
+  await globalThis.UploadStore.install(chrome, recording);
 
   try {
     await chrome.debugger.attach({tabId}, PROTOCOL_VERSION);
@@ -215,19 +230,28 @@ async function startRecording(message) {
     if (createBlankTab) {
       await moveRecorderToTab(tabId);
     }
-    if (startUrl) {
-      const navigation = await chrome.debugger.sendCommand({tabId}, "Page.navigate", {url: startUrl});
-      if (navigation?.errorText) {
-        throw new Error(`Unable to navigate to ${startUrl}: ${navigation.errorText}`);
-      }
-    }
   } catch (error) {
     await discardCurrentRecording();
     throw error;
   }
 
+  // Capture is ready before navigation, which may pause for HTTP authentication.
+  const owner = recording;
   setRecordingBadge(true);
   notify("recording-started", recorderStatus());
+  if (startUrl) {
+    try {
+      const navigation = await chrome.debugger.sendCommand({tabId}, "Page.navigate", {url: startUrl});
+      if (navigation?.errorText) throw new Error(navigation.errorText);
+    } catch (error) {
+      // A failed page load is recording evidence, not a failed debugger setup.
+      // Keep the initial request and continue capturing authentication retries.
+      if (recording === owner && !owner.stopping) {
+        owner.startWarning = `Recording is active. The start page could not load (${errorMessage(error)}). Complete authentication or retry the page; requests will continue to be captured.`;
+        notify("recorder-warning", {message: owner.startWarning});
+      }
+    }
+  }
   return recorderStatus();
 }
 
@@ -402,6 +426,7 @@ function deleteTransaction(id, requestDisposition = "delete") {
     throw new Error(`There is no ${requestDisposition} transaction`);
   }
 
+  globalThis.UploadStore.removeTransaction(recording, id, targetTransaction?.id);
   recording.transactions = recording.transactions.filter(item => item.id !== id);
   if (targetTransaction) {
     targetTransaction.requestCount += transaction.requestCount;
@@ -478,7 +503,10 @@ function transactionDetails(id) {
       status: entry.response.status,
       failed: entry._breaktest.failed,
       startedDateTime: entry.startedDateTime,
-      time: entry.time
+      time: entry.time,
+      size: entry.response.bodySize,
+      timingSource: entry._breaktest.timingSource,
+      timings: entry._breaktest.timingsAvailable === false ? null : entry.timings
     }));
   return {ok: true, transaction, requests};
 }
@@ -488,6 +516,7 @@ async function stopRecording() {
     throw new Error("No recording is active");
   }
   recording.stopping = true;
+  await globalThis.UploadStore.settle(recording);
   await settlePendingTasks();
 
   for (const state of recording.activeRequests.values()) {
@@ -929,6 +958,8 @@ function finalizeRequest(state, finishedTimestamp) {
       bodyTruncated: state.bodyTruncated,
       bodyUnavailable: Boolean(state.bodyUnavailable),
       bodyUnavailableReason: state.bodyUnavailableReason || "",
+      timingSource: state.timing ? "network" : "response-events",
+      timingsAvailable: Boolean(state.timing) || Number.isFinite(state.responseTimestamp),
       requestBodyUnavailable: Boolean(state.requestBodyUnavailable),
       failed: state.failed,
       incomplete: state.incomplete,
@@ -950,6 +981,8 @@ function finalizeRequest(state, finishedTimestamp) {
     status: state.response.status,
     resourceType: state.resourceType,
     size: state.response.bodySize,
+    timingSource: entry._breaktest.timingSource,
+    timings: entry._breaktest.timingsAvailable === false ? null : entry.timings,
     startedDateTime: state.startedDateTime,
     time: totalMs,
     failed: state.failed,
@@ -964,6 +997,7 @@ function finalizeRequest(state, finishedTimestamp) {
 }
 
 function buildHar(session) {
+  const uploadCapture = globalThis.UploadStore.exportFiles(session);
   const entries = [...session.entries].sort((left, right) => {
     const timeDifference = Date.parse(left.startedDateTime) - Date.parse(right.startedDateTime);
     return timeDifference || left._breaktest.entryOrdinal - right._breaktest.entryOrdinal;
@@ -982,6 +1016,7 @@ function buildHar(session) {
         recordedWith: "chrome.debugger",
         startedDateTime: new Date(session.startedAt).toISOString(),
         tabTitle: session.tabTitle,
+        ...(uploadCapture ? {uploadCapture} : {}),
         transactions: session.transactions
       }
     }
@@ -991,7 +1026,10 @@ function buildHar(session) {
 function buildTimings(state, totalMs) {
   const timing = state.timing;
   if (!timing) {
-    return {blocked: 0, dns: -1, connect: -1, ssl: -1, send: 0, wait: totalMs, receive: 0};
+    const beforeResponse = Number.isFinite(state.responseTimestamp)
+      ? Math.min(Math.max((state.responseTimestamp - state.requestTimestamp) * 1000, 0), totalMs)
+      : totalMs;
+    return {blocked: 0, dns: -1, connect: -1, ssl: -1, send: 0, wait: beforeResponse, receive: totalMs - beforeResponse};
   }
   const dns = duration(timing.dnsStart, timing.dnsEnd);
   const connect = duration(timing.connectStart, timing.connectEnd);
@@ -1116,6 +1154,7 @@ function recorderStatus() {
     attached: recording.attached,
     reconnecting: recording.reconnecting,
     detachReason: recording.detachReason,
+    startWarning: recording.startWarning || null,
     tabId: recording.tabId,
     currentTransaction: recording.currentTransaction,
     transactions: recording.transactions,
@@ -1177,10 +1216,40 @@ async function safeCommand(target, method, params) {
 }
 
 function setRecordingBadge(active) {
-  chrome.action.setBadgeText({text: active ? "REC" : ""});
-  if (active) {
-    chrome.action.setBadgeBackgroundColor({color: "#c62828"});
+  const owner = recording;
+  // A global badge follows every tab, so explicitly use a tab-specific badge.
+  chrome.action.setBadgeText({text: ""}).catch(() => {});
+  if (Number.isInteger(owner?.tabId)) {
+    chrome.action.setBadgeText({tabId: owner.tabId, text: active ? "REC" : ""}).catch(() => {});
+    if (active) chrome.action.setBadgeBackgroundColor({tabId: owner.tabId, color: "#c62828"}).catch(() => {});
   }
+  locatorWrites = locatorWrites.catch(() => {}).then(() => active && owner
+    ? chrome.storage.local.set({[RECORDING_LOCATOR_KEY]: {tabId: owner.tabId, startedAt: owner.startedAt}})
+    : chrome.storage.local.remove(RECORDING_LOCATOR_KEY));
+  locatorWrites.catch(error => console.error(error));
+}
+
+async function focusRecordingTab() {
+  await locatorWrites;
+  const stored = await chrome.storage.local.get(["recordingLocatorNormal", "recordingLocatorPrivate"]);
+  let candidates = [stored.recordingLocatorNormal, stored.recordingLocatorPrivate]
+    .filter(candidate => Number.isInteger(candidate?.tabId))
+    .sort((a, b) => b.startedAt - a.startedAt);
+  if (recording && !recording.stopping) {
+    candidates.unshift({tabId: recording.tabId});
+  }
+
+  const attached = new Set((await chrome.debugger.getTargets()).filter(target => target.attached).map(target => target.tabId));
+  candidates = candidates.filter(candidate => candidate.tabId === recording?.tabId || attached.has(candidate.tabId));
+
+  for (const candidate of candidates) {
+    let tab;
+    try { tab = await chrome.tabs.get(candidate.tabId); } catch (_error) { continue; }
+    await chrome.tabs.update(tab.id, {active: true});
+    await chrome.windows.update(tab.windowId, {focused: true});
+    return {ok: true, tabId: tab.id};
+  }
+  throw new Error("No active recording tab was found. It may have been closed or the recording has finished.");
 }
 
 function notify(type, payload) {

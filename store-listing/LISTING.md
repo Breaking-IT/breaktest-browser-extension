@@ -22,19 +22,29 @@ Record browser traffic as a local HAR file with named BreakTest transactions.
 BreakTest Browser Recorder captures HTTP and HTTPS traffic directly through
 the browser's debugging and web-request APIs. It does not require a proxy.
 
-Start recording in the current tab, a prepared new tab, or a private browser
-window. Enter transaction names while you work so BreakTest can turn them into
-Transaction Controllers when the HAR is imported.
+Start recording here without reloading the current page, or start in an
+incognito/private window. Use the next-transaction popup to name each step;
+it automatically increments counters such as UC1_01_ to UC1_02_. BreakTest
+can turn named transactions into Transaction Controllers when importing HAR.
 
 Features:
 
-- captures the first homepage request by attaching before the Start URL loads;
+- captures the first homepage request in incognito by attaching before the Start URL loads;
 - records request and response headers, bodies, timings, and status details;
 - assigns requests to named transactions as you perform a scenario;
+- embeds selected/dropped file bytes in a custom HAR upload inventory (including
+  files selected but never submitted; 20 MiB per file and 64 MiB per recording);
+- shows compact request waterfalls with response sizes and available timing phases;
+- keeps Chrome recording active through initial authentication/navigation errors;
+- finds the recording tab using a button or Command+Shift+9 / Ctrl+Shift+9;
 - optionally disables the browser cache for a cold-cache recording;
 - supports incognito or private-window recording when browser access is
   enabled; and
 - exports locally for **File > Import HAR...** in BreakTest.
+
+Embedded files require importer support for the custom upload inventory; they
+are not automatically mapped to individual requests. No empty upload inventory
+is added when no files were captured.
 
 Recording begins only after you review and accept the recording-data notice.
 That consent is remembered in the browser and can be reviewed or revoked from
@@ -62,15 +72,23 @@ file with named BreakTest transactions.
   **Finish and export**, allowing the HAR filename and folder to be selected.
 - `sidePanel`: Provides the visible recorder controls, transaction list, and
   live request status. In Chrome and Edge it is enabled only for the tab where
-  the recorder was opened or the new tab created for recording.
+  the recorder was opened.
 - `storage`: Remembers the accepted disclosure version and temporarily
   coordinates an explicitly requested incognito launch. Launch instructions
   expire after 60 seconds. Separately, the extension stages a completed HAR in
   browser-local IndexedDB until its download succeeds, the user discards it,
-  or cleanup runs after it becomes 24 hours old.
+  or cleanup runs after it becomes 24 hours old. A recording-tab identifier is
+  temporarily stored so the locator can find normal and incognito recordings.
 - `tabs`: Creates or selects the recording tab, reads the selected tab's URL
   and title, navigates to the user-supplied Start URL, and replaces the
   temporary private-window launcher page with the recorded site.
+
+- `scripting`: Injects the packaged isolated-world file-capture helper into the
+  recorded tab and its accessible frames. File bytes are read only after the
+  background verifies an active user-consented recording.
+- Host access (`<all_urls>`): Enables file capture on the arbitrary HTTP/HTTPS
+  application the user selects. Content scripts ask the background to authorize
+  capture and do not read file bytes outside the recorded tab/session.
 
 ### Data disclosures
 
@@ -79,7 +97,7 @@ even though nothing is uploaded. Select the dashboard categories corresponding
 to:
 
 - web history or browsing activity: URLs, methods, resource types, and timing;
-- website content: request and response headers and bodies;
+- website content: request and response headers, bodies, and selected file content;
 - authentication information: cookies, authorization headers, and tokens; and
 - personal or sensitive categories that can occur inside arbitrary recorded
   website content, including identifying information, communications,

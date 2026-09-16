@@ -12,6 +12,14 @@ const CACHE_OVERRIDE_KEY = "firefoxCacheOverrideActive";
 const REQUEST_FILTER = {urls: ["http://*/*", "https://*/*"]};
 
 let recording = null;
+const RECORDING_LOCATOR_KEY = "recordingLocatorNormal";
+// Clear this background context's stale locator after an extension/browser restart.
+let locatorWrites = browser.storage.local.remove(RECORDING_LOCATOR_KEY).catch(() => {});
+browser.commands.onCommand.addListener(command => {
+  if (command === "focus-recording-tab") {
+    focusRecordingTab().catch(error => notify("recorder-warning", {message: errorMessage(error)}));
+  }
+});
 const uiPorts = new Set();
 const cacheRecovery = recoverStaleCacheOverride();
 
@@ -27,7 +35,7 @@ browser.runtime.onConnect.addListener(port => {
   port.onDisconnect.addListener(() => uiPorts.delete(port));
 });
 
-browser.runtime.onMessage.addListener(message => handleMessage(message));
+browser.runtime.onMessage.addListener((message, sender) => handleMessage(message, sender));
 
 browser.tabs.onRemoved.addListener(tabId => {
   if (!recording || recording.tabId !== tabId || recording.stopping) {
@@ -62,7 +70,10 @@ browser.webRequest.onBeforeRedirect.addListener(beforeRedirect, REQUEST_FILTER);
 browser.webRequest.onCompleted.addListener(completed, REQUEST_FILTER);
 browser.webRequest.onErrorOccurred.addListener(failed, REQUEST_FILTER);
 
-async function handleMessage(message) {
+async function handleMessage(message, sender = {}) {
+  if (message?.type?.startsWith("upload-")) {
+    return globalThis.UploadStore.handle(recording, message, sender);
+  }
   switch (message?.type) {
     case "start-recording":
       return startRecording(message);
@@ -78,6 +89,8 @@ async function handleMessage(message) {
       return stopRecording();
     case "cancel-recording":
       return cancelRecording();
+    case "focus-recording-tab":
+      return focusRecordingTab();
     case "recorder-status":
       return recorderStatus();
     default:
@@ -139,6 +152,7 @@ async function startRecording(message) {
     nextEntryOrdinal: 0
   };
   startTransactionInternal(transactionName);
+  await globalThis.UploadStore.install(browser, recording);
 
   try {
     if (startUrl) {
@@ -231,6 +245,7 @@ function deleteTransaction(id, requestDisposition = "delete") {
     throw new Error(`There is no ${requestDisposition} transaction`);
   }
 
+  globalThis.UploadStore.removeTransaction(recording, id, targetTransaction?.id);
   recording.transactions = recording.transactions.filter(item => item.id !== id);
   if (targetTransaction) {
     targetTransaction.requestCount += transaction.requestCount;
@@ -305,7 +320,9 @@ function transactionDetails(id) {
       status: entry.response.status,
       failed: entry._breaktest.failed,
       startedDateTime: entry.startedDateTime,
-      time: entry.time
+      time: entry.time,
+      size: entry.response.bodySize,
+      timings: entry._breaktest.timingsAvailable === false ? null : entry.timings
     }));
   return {ok: true, transaction, requests};
 }
@@ -315,6 +332,7 @@ async function stopRecording() {
     throw new Error("No recording is active");
   }
   recording.stopping = true;
+  await globalThis.UploadStore.settle(recording);
   const owner = recording;
   for (const state of [...owner.pendingStates]) {
     state.incomplete = !state.requestDone;
@@ -647,6 +665,7 @@ function finalizeRequest(owner, state, finishedAt) {
     status: state.response.status,
     resourceType: state.resourceType,
     size: state.response.bodySize,
+    timings: entry._breaktest.timingsAvailable === false ? null : entry.timings,
     startedDateTime: state.startedDateTime,
     time: totalMs,
     failed: state.failed,
@@ -686,6 +705,7 @@ function buildTimings(state, totalMs) {
 }
 
 function buildHar(owner) {
+  const uploadCapture = globalThis.UploadStore.exportFiles(owner);
   const entries = [...owner.entries].sort((left, right) => {
     const timeDifference = Date.parse(left.startedDateTime) - Date.parse(right.startedDateTime);
     return timeDifference || left._breaktest.entryOrdinal - right._breaktest.entryOrdinal;
@@ -705,6 +725,7 @@ function buildHar(owner) {
         startedDateTime: new Date(owner.startedAt).toISOString(),
         tabTitle: owner.tabTitle,
         cacheDisabled: owner.disableCache,
+        ...(uploadCapture ? {uploadCapture} : {}),
         transactions: owner.transactions
       }
     }
@@ -941,10 +962,37 @@ function isRecordableUrl(url) {
 }
 
 function setRecordingBadge(active) {
-  browser.action.setBadgeText({text: active ? "REC" : ""});
-  if (active) {
-    browser.action.setBadgeBackgroundColor({color: "#c62828"});
+  const owner = recording;
+  // A global badge follows every tab, so explicitly use a tab-specific badge.
+  browser.action.setBadgeText({text: ""}).catch(() => {});
+  if (Number.isInteger(owner?.tabId)) {
+    browser.action.setBadgeText({tabId: owner.tabId, text: active ? "REC" : ""}).catch(() => {});
+    if (active) browser.action.setBadgeBackgroundColor({tabId: owner.tabId, color: "#c62828"}).catch(() => {});
   }
+  locatorWrites = locatorWrites.catch(() => {}).then(() => active && owner
+    ? browser.storage.local.set({[RECORDING_LOCATOR_KEY]: {tabId: owner.tabId, startedAt: owner.startedAt}})
+    : browser.storage.local.remove(RECORDING_LOCATOR_KEY));
+  locatorWrites.catch(error => console.error(error));
+}
+
+async function focusRecordingTab() {
+  await locatorWrites;
+  const stored = await browser.storage.local.get(["recordingLocatorNormal", "recordingLocatorPrivate"]);
+  let candidates = [stored.recordingLocatorNormal, stored.recordingLocatorPrivate]
+    .filter(candidate => Number.isInteger(candidate?.tabId))
+    .sort((a, b) => b.startedAt - a.startedAt);
+  if (recording && !recording.stopping) {
+    candidates.unshift({tabId: recording.tabId});
+  }
+
+  for (const candidate of candidates) {
+    let tab;
+    try { tab = await browser.tabs.get(candidate.tabId); } catch (_error) { continue; }
+    await browser.tabs.update(tab.id, {active: true});
+    await browser.windows.update(tab.windowId, {focused: true});
+    return {ok: true, tabId: tab.id};
+  }
+  throw new Error("No active recording tab was found. It may have been closed or the recording has finished.");
 }
 
 function notify(type, payload = {}) {

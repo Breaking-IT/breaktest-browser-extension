@@ -50,44 +50,33 @@ See that directory's README for installation and browser-specific behavior.
 
 Chrome and Edge use the same extension files. No separate Edge build is needed.
 
-## Record a scenario from its first request
+## Start recording
 
-1. Click the BreakTest extension icon to open the side panel.
-2. Enter the **Start URL**, for example `https://application.example/`.
-3. Keep the initial transaction name `01_OpenHomepage`, or replace it.
-4. Optionally select **Disable browser cache while recording** when you need a
-   forced cold-cache recording. It is off by default.
-5. Choose **Start in new tab**.
+1. Open the page you want to record and open the recorder panel.
+2. Keep `01_OpenHomepage` as the initial transaction name, or replace it.
+3. Optionally select **Disable browser cache while recording**.
+4. Choose **Start recording here** to attach to the current page without reloading.
 
-The extension creates a new tab, attaches the DevTools recorder, and only
-then opens the Start URL. This ordering captures the homepage document request
-and all resources loaded by it.
+Only subsequent requests are recorded. Reload the page manually after starting
+if you want to capture its initial load. To start a fresh incognito session,
+enter the **Incognito start URL** and choose **Start in incognito**; capture
+starts before navigation. The URL field does not affect **Start recording here**.
+Browser internal and extension pages cannot be recorded; open an HTTP/HTTPS
+page first or use the incognito action.
 
 The recorder panel belongs to the tab where it was opened. Chrome and Edge
-hide it when you switch to another tab and show it again when you return. When
-**Start in new tab** is used, the extension moves the recorder panel to the
-new recording tab.
-
-**Start current tab** records only requests that start after the recorder has
-attached. It cannot recover the requests that originally loaded the page.
-
-Chrome internal pages, extension pages, and browser settings cannot be
-recorded. Enter a Start URL and use **Start in new tab** instead.
+hide it when you switch tabs and show it again when you return.
 
 ## Name transactions while recording
 
-The transaction field always shows the transaction that will receive new
-requests.
-
-1. Complete the actions for the current transaction.
-2. Type the next name, for example `02_Login` or `03_OpenDashboard`.
-3. Move the pointer from the field toward the next action.
-4. Perform that action.
-
-Moving the pointer after typing commits the new name in the background. There
-is no confirmation button. Requests that start while you are still typing stay
-with the previous transaction. Responses that finish later remain assigned to
-the transaction in which their request started.
+The transaction field shows the current transaction. Click the **→** button
+on its right to open **Next transaction**. The popup increments the last numeric
+counter: `01_Openhomepage` suggests `02_`, and `UC1_01_Homepage` suggests
+`UC1_02_`. Leading zeros and the prefix are preserved; names without a counter
+start at `01_`. Type the description and press Enter or **Start transaction**.
+Cancel or Escape keeps the current transaction. New requests stay with the
+current transaction until you confirm; requests already in progress retain
+the transaction in which they started.
 
 The Transactions list displays the number of requests assigned to each name.
 Use the edit icon beside a transaction to rename it and update all requests
@@ -161,11 +150,20 @@ The browser does not automatically update an unpacked extension.
 
 ## Troubleshooting
 
+### The start page requires HTTP authentication or fails to load
+
+Recording becomes active before the incognito start URL is opened. A 401
+challenge or navigation error leaves the recorder attached and preserves the
+requests already captured. Complete the browser's authentication prompt or
+retry the page while recording remains active, then finish and export normally.
+Failure to attach the debugger or enable network capture still stops startup.
+
+
 ### “Chrome internal and extension pages cannot be recorded”
 
 The selected tab is a New Tab, settings page, extension page, or another
 protected browser page. Enter the application URL in **Start URL** and choose
-**Start in new tab**.
+**Start in incognito**.
 
 ### The recorder is missing in a private window
 
@@ -235,3 +233,49 @@ redact HAR files before sharing them or committing them to source control.
 
 The recorder processes and exports data locally. It does not upload recordings
 to a BreakTest service.
+
+## Uploaded file content
+
+While recording, the extension reads files selected in file inputs, dropped into
+the recorded tab, or observed in a DOM `formdata` event. Existing file selections
+are also captured when recording starts. This includes files selected but never
+submitted. File bytes stay local and are included in the exported HAR at
+`log._breaktest.uploadCapture.files`.
+
+Each record contains `fileName`, `mimeType`, `size` (original byte count),
+`fieldName`, `source`, `pageUrl`, `frameId`, `transactionId` (when available),
+`capturedDateTime`, and `status`. A complete record has `encoding: "base64"` and
+`content`: decode that string as base64 to recover the exact original file,
+including binary files and empty files. An unavailable record has a `reason`
+and no `content`. The original network request body is not rewritten.
+
+Capture is limited to 20 MiB per file, 64 MiB total original file bytes per
+recording, and 1,000 file records. The HAR reports size-limit failures,
+interrupted reads/transfers, and the file-count limit explicitly. Export waits
+up to five seconds for transfers already accepted by the recorder. Navigation
+can interrupt a transfer. Same-file observations may appear more than once if
+the browser supplies different File objects; filenames are not unique IDs.
+
+This is a file inventory, not a claim that a file was sent or a mapping to an
+HTTP request. Importers must explicitly support this custom field; existing
+HAR consumers can ignore it. It does not capture arbitrary programmatically
+created fetch/XHR Blob bodies, worker-generated files, inaccessible closed
+shadow roots, or files on pages where the browser blocks content scripts.
+A `formdata` event on a detached form is also outside the document listener.
+Select/drop the original file again during a new recording to recover content
+that was absent from an older HAR.
+
+The `scripting` and host permissions let the isolated content script read files
+in the recorded tab and its accessible frames. It asks the background recorder
+whether that tab is recording before reading any bytes, and does not send file
+contents to the page or any external service.
+
+## Find the recording tab
+
+Click **Go to recording tab** in the recorder, or press **Command+Shift+9** on
+macOS (**Ctrl+Shift+9** on Windows/Linux). This selects the recorded tab and
+focuses its window, including an incognito recording. If multiple recording
+contexts exist, the current context's recording is preferred, then the most
+recent one. Chrome's shortcut can be reassigned at `chrome://extensions/shortcuts`
+if another extension already uses it. Pin the extension to see the red **REC**
+badge, which now appears only when the recorded tab is selected.

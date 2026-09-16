@@ -1,6 +1,6 @@
 # Chrome Web Store submission checklist
 
-Use this checklist for the `1.1.1` submission. Keep the answers aligned
+Use this checklist for the `1.2.0` submission. Keep the answers aligned
 with [LISTING.md](LISTING.md), [REVIEW_NOTES.md](REVIEW_NOTES.md), and the
 public [privacy policy](../PRIVACY.md).
 
@@ -21,7 +21,7 @@ python3 scripts/validate_extensions.py
 python3 scripts/package_extensions.py
 ```
 
-Upload `dist/breaktest-browser-recorder-chrome-edge-1.1.1.zip`. The generated
+Upload `dist/breaktest-browser-recorder-chrome-edge-1.2.0.zip`. The generated
 ZIP and checksums are release artifacts and are intentionally not committed.
 
 ## 3. Store listing
@@ -70,6 +70,14 @@ The 1400x560 marquee image and a promotional video are optional.
 - `tabs`: Creates or selects the recording tab, reads its URL and title,
   navigates to a user-supplied Start URL, and prepares the private-window
   launcher tab for recording.
+
+- `scripting`: Installs the packaged isolated-world file-capture script in the
+  selected recording tab and its frames. It reads selected/dropped file bytes
+  only after the background confirms an active, user-consented recording.
+- Host access (`<all_urls>`): Users may record arbitrary HTTP/HTTPS sites.
+  Packaged content scripts observe file selections and formdata; the background
+  authorizes byte capture only for the recorded tab. No file bytes are read
+  outside an active recording, and no captured data is sent to the publisher.
 
 ### Remote code
 
@@ -121,6 +129,6 @@ Before choosing **Submit for review**:
 
 - confirm the privacy-policy URL is live;
 - install the exact uploaded ZIP in a clean Chrome profile and complete one
-  new-tab recording and export;
+  current-tab recording and export;
 - confirm the listing, privacy disclosures, and package behavior agree; and
 - retain `dist/SHA256SUMS` with the release artifacts.

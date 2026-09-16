@@ -23,6 +23,12 @@
           <p id="transaction-details-summary"></p>
         </div>
       </div>
+      <div class="waterfall-legend" aria-label="Waterfall phases">
+        <span><i class="phase-connection"></i>Connection / sending</span>
+        <span><i class="phase-wait"></i>Waiting</span>
+        <span><i class="phase-receive"></i>Receiving</span>
+        <span id="timing-unknown-legend" title="The browser supplied a duration but no timing breakdown." hidden><i class="phase-unknown"></i>No timing breakdown</span>
+      </div>
       <div class="request-detail-table-wrap">
         <table class="request-detail-table">
           <thead>
@@ -30,6 +36,7 @@
               <th scope="col">HTTP</th>
               <th scope="col">Method</th>
               <th scope="col">URL &amp; waterfall</th>
+              <th scope="col" title="Recorded response size in kilobytes (1 KB = 1,000 bytes)">Size (KB)</th>
               <th scope="col" title="Response time">Time</th>
             </tr>
           </thead>

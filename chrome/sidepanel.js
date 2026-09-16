@@ -8,6 +8,19 @@
 
 import "./har-export-store.js";
 
+const focusRecordingButton = document.querySelector("#focus-recording-tab");
+focusRecordingButton.addEventListener("click", async () => {
+  focusRecordingButton.disabled = true;
+  try {
+    const response = await send({type: "focus-recording-tab"});
+    if (!response?.ok) throw new Error(response?.error || "Unable to find the recording tab");
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    focusRecordingButton.disabled = false;
+  }
+});
+
 const transactionName = document.querySelector("#transaction-name");
 const startUrl = document.querySelector("#start-url");
 const disableCache = document.querySelector("#disable-cache");
@@ -19,7 +32,13 @@ const privacyDoneButton = document.querySelector("#privacy-done-button");
 const startSetup = document.querySelector("#start-setup");
 const startActions = document.querySelector("#start-actions");
 const startButton = document.querySelector("#start-button");
-const blankStartButton = document.querySelector("#blank-start-button");
+const nextTransactionButton = document.querySelector("#next-transaction-button");
+const nextTransactionDialog = document.querySelector("#next-transaction-dialog");
+const nextTransactionInput = document.querySelector("#next-transaction-input");
+const nextTransactionForm = document.querySelector("#next-transaction-form");
+const nextTransactionError = document.querySelector("#next-transaction-error");
+const confirmNextTransaction = document.querySelector("#confirm-next-transaction");
+const cancelNextTransaction = document.querySelector("#cancel-next-transaction");
 const incognitoStartButton = document.querySelector("#incognito-start-button");
 const stopButton = document.querySelector("#stop-button");
 const discardButton = document.querySelector("#discard-button");
@@ -47,22 +66,19 @@ let busy = false;
 let errors = 0;
 let pendingExport = null;
 let currentTransactionId = null;
-let lastCommittedTransactionName = transactionName.value.trim();
-let transactionNameDirty = false;
-let lastTransactionInputAt = 0;
-let transactionCommitTimer = null;
-let transactionCommitPromise = Promise.resolve();
-const TRANSACTION_TYPING_SETTLE_MS = 250;
 const INCOGNITO_LAUNCH_KEY = "pendingIncognitoLaunch";
 const INCOGNITO_LAUNCH_TTL_MS = 60_000;
 const RECORDING_CONSENT_KEY = "recordingDisclosureAcceptedVersion";
-const RECORDING_DISCLOSURE_VERSION = 2;
+const RECORDING_DISCLOSURE_VERSION = 3;
 const DEFAULT_TRANSACTION_NAME = "01_OpenHomepage";
 let recordingConsentAccepted = false;
 const inIncognitoContext = chrome.extension.inIncognitoContext;
 
 startButton.addEventListener("click", () => startRecording(false));
-blankStartButton.addEventListener("click", () => startRecording(true));
+nextTransactionButton.addEventListener("click", openNextTransaction);
+nextTransactionForm.addEventListener("submit", startNextTransaction);
+cancelNextTransaction.addEventListener("click", () => nextTransactionDialog.close());
+nextTransactionDialog.addEventListener("cancel", event => { if (busy) event.preventDefault(); });
 incognitoStartButton.addEventListener("click", startIncognitoRecording);
 recordingConsent.addEventListener("change", persistRecordingConsent);
 privacySettingsButton.addEventListener("click", showPrivacySettings);
@@ -75,18 +91,11 @@ clearViewButton.addEventListener("click", () => {
   errorCount.textContent = "0";
 });
 transactionName.addEventListener("keydown", event => {
-  if (event.key === "Enter") {
+  if (event.key === "Enter" && !busy) {
     event.preventDefault();
-    active ? commitPendingTransaction() : startRecording(true);
+    active ? openNextTransaction() : startRecording(false);
   }
 });
-transactionName.addEventListener("input", () => {
-  transactionNameDirty = transactionName.value.trim() !== lastCommittedTransactionName;
-  lastTransactionInputAt = Date.now();
-  clearTimeout(transactionCommitTimer);
-});
-transactionName.addEventListener("blur", () => scheduleTransactionCommit(true));
-document.addEventListener("pointermove", () => scheduleTransactionCommit(false));
 
 chrome.runtime.onMessage.addListener(message => {
   switch (message.type) {
@@ -275,6 +284,7 @@ async function restoreStatus() {
     return;
   }
   applyStatus(response);
+  if (response.startWarning) setStatus(response.startWarning);
   if (!response.active) {
     requestList.replaceChildren();
     transactionList.replaceChildren();
@@ -286,64 +296,26 @@ async function restoreStatus() {
   }
 }
 
-async function startRecording(createBlankTab) {
-  if (!requireRecordingConsent()) {
-    return false;
-  }
+async function startRecording() {
+  if (!requireRecordingConsent()) return false;
   setBusy(true);
-  let sourceTab;
-  let createdTab;
   try {
-    [sourceTab] = await chrome.tabs.query({active: true, lastFocusedWindow: true});
-    let tab = sourceTab;
-    if (createBlankTab) {
-      createdTab = await chrome.tabs.create({
-        windowId: sourceTab?.windowId,
-        url: "about:blank",
-        active: false
-      });
-      tab = createdTab;
-      await chrome.sidePanel.setOptions({
-        tabId: tab.id,
-        path: "sidepanel.html",
-        enabled: true
-      });
-      await chrome.tabs.update(tab.id, {active: true});
-      await chrome.sidePanel.open({tabId: tab.id});
-    }
+    const [tab] = await chrome.tabs.query({active: true, lastFocusedWindow: true});
     const response = await send({
       type: "start-recording",
       tabId: tab?.id,
-      windowId: tab?.windowId,
       transactionName: transactionName.value,
-      startUrl: startUrl.value,
-      createBlankTab: false,
-      preparedNewTab: Boolean(createdTab),
+      startUrl: "",
       disableCache: disableCache.checked
     });
-    if (!response.ok) {
-      throw new Error(response.error);
-    }
-    if (createdTab) {
-      if (typeof chrome.sidePanel.close === "function" && Number.isInteger(sourceTab?.id)) {
-        await chrome.sidePanel.close({tabId: sourceTab.id}).catch(() => {});
-      }
-    }
+    if (!response.ok) throw new Error(response.error);
     requestList.replaceChildren();
     errors = 0;
     errorCount.textContent = "0";
     applyStatus(response);
-    setStatus(startUrl.value.trim()
-      ? `${response.incognito ? "Incognito recording" : "Recording"} started and the start URL was opened.`
-      : (createBlankTab
-        ? `${response.incognito ? "Incognito recording" : "Recording"} started in a new tab.`
-        : `${response.incognito ? "Incognito recording" : "Recording"} the selected tab.`));
+    setStatus("Recording the current page. Reload it manually if you want to capture its initial requests.");
     return true;
   } catch (error) {
-    if (createdTab && Number.isInteger(sourceTab?.id)) {
-      await chrome.tabs.update(sourceTab.id, {active: true}).catch(() => {});
-      await chrome.tabs.remove(createdTab.id).catch(() => {});
-    }
     showError(error.message);
     return false;
   } finally {
@@ -351,42 +323,49 @@ async function startRecording(createBlankTab) {
   }
 }
 
-function scheduleTransactionCommit(force) {
-  if (!active || !transactionNameDirty) {
-    return;
-  }
-  clearTimeout(transactionCommitTimer);
-  const elapsed = Date.now() - lastTransactionInputAt;
-  const delay = force ? 0 : Math.max(0, TRANSACTION_TYPING_SETTLE_MS - elapsed);
-  transactionCommitTimer = setTimeout(() => commitPendingTransaction(), delay);
+function nextTransactionPrefix(name) {
+  // Increment the last underscore-delimited numeric token, preserving its width and prefix.
+  const matches = [...name.trim().matchAll(/(?:^|_)(\d+)(?=_)/g)];
+  const match = matches.at(-1);
+  if (!match) return "01_";
+  const digitsAt = match.index + (match[0].startsWith("_") ? 1 : 0);
+  const number = (BigInt(match[1]) + 1n).toString().padStart(match[1].length, "0");
+  return name.trim().slice(0, digitsAt) + number + "_";
 }
 
-function commitPendingTransaction() {
-  clearTimeout(transactionCommitTimer);
-  transactionCommitPromise = transactionCommitPromise.then(async () => {
-    if (!active || !transactionNameDirty) {
-      return;
-    }
-    const name = transactionName.value.trim();
-    if (!name) {
-      showError("Enter a transaction name");
-      return;
-    }
-    if (name === lastCommittedTransactionName) {
-      transactionNameDirty = false;
-      return;
-    }
+function openNextTransaction() {
+  if (!active || busy || nextTransactionDialog.open) return;
+  nextTransactionInput.value = nextTransactionPrefix(transactionName.value);
+  nextTransactionError.hidden = true;
+  nextTransactionDialog.showModal();
+  nextTransactionInput.focus();
+  const end = nextTransactionInput.value.length;
+  nextTransactionInput.setSelectionRange(end, end);
+}
+
+async function startNextTransaction(event) {
+  event.preventDefault();
+  if (!active || busy) return;
+  const name = nextTransactionInput.value.trim();
+  if (!name) {
+    nextTransactionError.textContent = "Enter a transaction name";
+    nextTransactionError.hidden = false;
+    nextTransactionInput.focus();
+    return;
+  }
+  setBusy(true);
+  try {
     const response = await send({type: "new-transaction", name});
-    if (!response.ok) {
-      showError(response.error);
-      return;
-    }
-    lastCommittedTransactionName = response.transaction.name;
-    transactionNameDirty = transactionName.value.trim() !== lastCommittedTransactionName;
+    if (!response.ok) throw new Error(response.error);
     applyStatus(response.status);
-    setStatus(`Recording transaction: ${lastCommittedTransactionName}`);
-  });
-  return transactionCommitPromise;
+    nextTransactionDialog.close();
+    setStatus(`Recording transaction: ${response.transaction.name}`);
+  } catch (error) {
+    nextTransactionError.textContent = error.message;
+    nextTransactionError.hidden = false;
+  } finally {
+    setBusy(false);
+  }
 }
 
 async function finishRecording() {
@@ -396,7 +375,6 @@ async function finishRecording() {
     : "Finishing pending requests and building HAR…");
   try {
     if (!pendingExport) {
-      await commitPendingTransaction();
       const response = await send({type: "stop-recording"});
       if (!response.ok) {
         throw new Error(response.error);
@@ -449,14 +427,11 @@ async function discardAndStartOver() {
 }
 
 function resetRecordingView() {
-  clearTimeout(transactionCommitTimer);
   requestList.replaceChildren();
   transactionList.replaceChildren();
   errors = 0;
   errorCount.textContent = "0";
   transactionName.value = DEFAULT_TRANSACTION_NAME;
-  lastCommittedTransactionName = DEFAULT_TRANSACTION_NAME;
-  transactionNameDirty = false;
   applyStatus({active: false, requestCount: 0, pendingCount: 0, transactions: []});
   updateRecordingControls();
 }
@@ -518,11 +493,7 @@ function applyStatus(status) {
   pendingCount.textContent = String(status.pendingCount ?? 0);
   if (status.currentTransaction) {
     const currentName = status.currentTransaction.name;
-    if (!transactionNameDirty) {
-      transactionName.value = currentName;
-    }
-    lastCommittedTransactionName = currentName;
-    transactionNameDirty = transactionName.value.trim() !== lastCommittedTransactionName;
+    transactionName.value = currentName;
   }
   if (status.transactions) {
     renderTransactions(status.transactions);
@@ -536,11 +507,8 @@ function setActive(isActive) {
   updateStartControls();
   updateRecordingControls();
   transactionHint.hidden = !isActive;
-  transactionName.disabled = false;
-  if (!isActive) {
-    clearTimeout(transactionCommitTimer);
-    transactionNameDirty = false;
-  }
+  transactionName.readOnly = isActive;
+  if (!isActive && nextTransactionDialog.open) nextTransactionDialog.close();
   if (!isActive && !statusText.textContent.includes("saved")) {
     setStatus("");
   }
@@ -553,6 +521,10 @@ function setBusy(isBusy) {
 }
 
 function updateRecordingControls() {
+  nextTransactionButton.disabled = !active || busy;
+  confirmNextTransaction.disabled = busy;
+  cancelNextTransaction.disabled = busy;
+  nextTransactionInput.disabled = busy;
   const hasRecording = active;
   const hasUnsavedHar = Boolean(pendingExport);
   stopButton.textContent = hasUnsavedHar ? "Save HAR" : "Finish and export";
@@ -576,7 +548,7 @@ function requireRecordingConsent() {
 function updateStartControls() {
   const disabled = busy || active || Boolean(pendingExport) || !recordingConsentAccepted;
   startButton.disabled = disabled;
-  blankStartButton.disabled = disabled;
+
   incognitoStartButton.disabled = disabled;
 }
 
