@@ -106,6 +106,17 @@ async function main() {
       const decoder = new TextDecoder();
       while (!text.includes('line2')) text += decoder.decode((await reader.read()).value, {stream: true});
     })()`);
+    // CDP may deliver the initial fetch buffer after the page reads it. Its
+    // timestamp is intentionally estimated at retrieval; wait for capture before
+    // changing transaction so the fixture does not race that documented behavior.
+    await evaluate(workerSession, `(async () => {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const streams = [...recording.activeRequests.values()].filter(state => state.sse);
+        if (streams.length === 2 && streams.every(state => state.serverSentEvents.length === 1)) return;
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      throw new Error('Initial SSE events were not captured');
+    })()`);
     await evaluate(workerSession, "startTransaction('Second transaction')");
     await evaluate(pageSession, `(async () => {
       testSocket.send('second transaction send');
