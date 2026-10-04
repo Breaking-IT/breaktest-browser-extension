@@ -103,7 +103,11 @@ until the last private window closes.
   than extension-message transport limits. Available browser storage and
   memory bound the practical recording size.
 - Exports locally and does not upload recordings to a BreakTest service.
-- Does not convert individual WebSocket frames into JMeter samplers.
+- Records WebSocket handshakes and incoming/outgoing text and binary messages
+  using the [WebSocket HAR extension](../docs/websocket-har.md). Message capture
+  hooks the WebSocket API in documents and frames. Worker messages and raw
+  control frames are unavailable and coverage is marked in the HAR.
+- BreakTest WebSocket import/playback will be implemented separately.
 
 ## Troubleshooting
 
@@ -160,3 +164,10 @@ contexts exist, the current context's recording is preferred, then the most
 recent one. Chrome's shortcut can be reassigned at `chrome://extensions/shortcuts`
 if another extension already uses it. Pin the extension to see the red **REC**
 badge, which now appears only when the recorded tab is selected.
+
+### Streaming messages
+
+WebSocket messages include `_breaktest.transactionId` for the transaction active
+at capture time. SSE responses also include incoming messages and receive times
+in `_serverSentEvents`, covering native `EventSource` and `fetch` streams. See
+[the SSE HAR format](../docs/sse-har.md) for fields, limits, and capture diagnostics.

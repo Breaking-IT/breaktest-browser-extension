@@ -9,7 +9,7 @@
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_VISIBLE_REQUESTS = 1000;
 const CACHE_OVERRIDE_KEY = "firefoxCacheOverrideActive";
-const REQUEST_FILTER = {urls: ["http://*/*", "https://*/*"]};
+const REQUEST_FILTER = {urls: ["http://*/*", "https://*/*", "ws://*/*", "wss://*/*"]};
 
 let recording = null;
 const RECORDING_LOCATOR_KEY = "recordingLocatorNormal";
@@ -71,6 +71,9 @@ browser.webRequest.onCompleted.addListener(completed, REQUEST_FILTER);
 browser.webRequest.onErrorOccurred.addListener(failed, REQUEST_FILTER);
 
 async function handleMessage(message, sender = {}) {
+  if (message?.type?.startsWith("websocket-")) {
+    return globalThis.WebSocketStore.handle(recording, message, sender);
+  }
   if (message?.type?.startsWith("upload-")) {
     return globalThis.UploadStore.handle(recording, message, sender);
   }
@@ -153,6 +156,7 @@ async function startRecording(message) {
   };
   startTransactionInternal(transactionName);
   await globalThis.UploadStore.install(browser, recording);
+  await globalThis.WebSocketStore.install(browser, recording);
 
   try {
     if (startUrl) {
@@ -193,6 +197,7 @@ function startTransactionInternal(name) {
   };
   recording.transactions.push(transaction);
   recording.currentTransaction = transaction;
+  globalThis.MessageCapture.startTransaction(recording, transaction);
   return transaction;
 }
 
@@ -245,7 +250,9 @@ function deleteTransaction(id, requestDisposition = "delete") {
     throw new Error(`There is no ${requestDisposition} transaction`);
   }
 
+  globalThis.MessageCapture.removeTransaction(recording, id, targetTransaction?.id);
   globalThis.UploadStore.removeTransaction(recording, id, targetTransaction?.id);
+  globalThis.WebSocketStore.removeTransaction(recording, id, targetTransaction);
   recording.transactions = recording.transactions.filter(item => item.id !== id);
   if (targetTransaction) {
     targetTransaction.requestCount += transaction.requestCount;
@@ -332,10 +339,12 @@ async function stopRecording() {
     throw new Error("No recording is active");
   }
   recording.stopping = true;
+  await globalThis.WebSocketStore.settle(browser, recording);
   await globalThis.UploadStore.settle(recording);
   const owner = recording;
   for (const state of [...owner.pendingStates]) {
     state.incomplete = !state.requestDone;
+    state.sseParser?.finish();
     completeBody(state);
     finalizeRequest(owner, state, state.finishedAt || Date.now());
     disconnectFilter(state);
@@ -412,6 +421,7 @@ function beforeRequest(details) {
     },
     response: emptyResponse(),
     bodyChunks: [],
+    earlyStreamChunks: [],
     capturedBodyBytes: 0,
     receivedBodyBytes: 0,
     bodyDone: false,
@@ -434,7 +444,12 @@ function beforeRequest(details) {
   if (activeTransaction) {
     activeTransaction.requestCount++;
   }
-  attachResponseFilter(owner, state);
+  if (details.type === "websocket" || /^wss?:/i.test(details.url)) {
+    state.bodyDone = true;
+    globalThis.WebSocketStore.handshake(owner, state, details);
+  } else {
+    attachResponseFilter(owner, state);
+  }
   return {};
 }
 
@@ -446,6 +461,20 @@ function attachResponseFilter(owner, state) {
       try {
         if (recording === owner && !state.finalized) {
           captureBodyChunk(state, event.data);
+          if (!owner.stopping) {
+            const time = Date.now() / 1000;
+            if (state.sseParser) state.sseParser.feed(event.data, time);
+            else if (state.earlyStreamChunks) {
+              const available = MAX_BODY_BYTES - (state.earlyStreamBytes || 0);
+              const bytes = new Uint8Array(event.data);
+              if (available > 0) {
+                const captured = bytes.slice(0, available);
+                state.earlyStreamChunks.push({bytes: captured, time});
+                state.earlyStreamBytes = (state.earlyStreamBytes || 0) + captured.length;
+              }
+              if (bytes.length > available) state.earlyStreamTruncated = true;
+            }
+          }
         }
       } finally {
         filter.write(event.data);
@@ -455,12 +484,16 @@ function attachResponseFilter(owner, state) {
       filter.close();
       state.filter = null;
       state.bodyDone = true;
+      state.sseParser?.finish();
+      if (state.sse) state.sse.captureEnd = "stream-ended";
       completeBody(state);
       maybeFinalize(owner, state);
     };
     filter.onerror = () => {
       state.filter = null;
       state.bodyDone = true;
+      state.sseParser?.finish();
+      if (state.sse) state.sse.captureEnd = "request-failed";
       if (responseMayHaveBody(state)) {
         state.bodyUnavailable = true;
         state.bodyUnavailableReason = filter.error || "Firefox response filter failed";
@@ -563,6 +596,8 @@ function failed(details) {
   if (!state || !owner) {
     return;
   }
+  state.sseParser?.finish();
+  if (state.sse) state.sse.captureEnd = "request-failed";
   state.failed = true;
   state.failureText = details.error || "Request failed";
   state.requestDone = true;
@@ -575,7 +610,7 @@ function failed(details) {
 }
 
 function requestState(details) {
-  if (!captures(recording, details)) {
+  if (!recording || details.tabId !== recording.tabId) {
     return null;
   }
   return recording.activeRequests.get(details.requestId) || null;
@@ -586,7 +621,7 @@ function captures(owner, details) {
     && !owner.stopping
     && owner.attached
     && details.tabId === owner.tabId
-    && /^https?:/i.test(details.url));
+    && /^(https?|wss?):/i.test(details.url));
 }
 
 function maybeFinalize(owner, state) {
@@ -623,6 +658,7 @@ function finalizeRequest(owner, state, finishedAt) {
     return;
   }
   state.finalized = true;
+  state.webSocketResolve?.();
   owner.pendingStates.delete(state);
   const end = Number.isFinite(finishedAt) ? finishedAt : state.startedAt;
   const totalMs = Math.max(end - state.startedAt, 0);
@@ -650,6 +686,14 @@ function finalizeRequest(owner, state, finishedAt) {
       failureText: state.failureText || ""
     }
   };
+  if (state.sse) {
+    entry._serverSentEvents = state.serverSentEvents;
+    entry._breaktest.sse = state.sse;
+  }
+  if (state.webSocket) {
+    entry._webSocketMessages = state.webSocketMessages;
+    entry._breaktest.webSocket = state.webSocket;
+  }
   if (state.fromCache) {
     entry._fromCache = "firefox-cache";
   }
@@ -691,6 +735,14 @@ function applyResponse(state, details) {
   state.response.headers = headers;
   state.response.content.mimeType = mimeType(headers);
   state.response.redirectURL = headerValue(headers, "location") || state.response.redirectURL;
+  if (state.response.content.mimeType.split(";")[0].trim().toLowerCase() === "text/event-stream" && !state.sse) {
+    globalThis.SseCapture.init(state, "firefox.webRequest.response-stream");
+    state.sseParser = globalThis.SseCapture.parser(state.owner, state, headerValue(state.request.headers, "last-event-id") || "");
+    if (state.bodyUnavailable || state.earlyStreamTruncated) state.sse.captureIncomplete = true;
+    for (const chunk of state.earlyStreamChunks || []) state.sseParser.feed(chunk.bytes, chunk.time);
+    state.earlyStreamChunks = null;
+  }
+  if (details.responseHeaders && state.response.content.mimeType !== "text/event-stream") state.earlyStreamChunks = null;
 }
 
 function buildTimings(state, totalMs) {
@@ -725,6 +777,7 @@ function buildHar(owner) {
         startedDateTime: new Date(owner.startedAt).toISOString(),
         tabTitle: owner.tabTitle,
         cacheDisabled: owner.disableCache,
+        webSocketCapture: globalThis.WebSocketStore.exportMetadata(owner),
         ...(uploadCapture ? {uploadCapture} : {}),
         transactions: owner.transactions
       }

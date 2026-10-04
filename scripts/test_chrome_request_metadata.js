@@ -8,6 +8,7 @@ const vm = require("node:vm");
 const listener = () => ({addListener() {}});
 const context = {
   console,
+  atob,
   crypto: require("node:crypto").webcrypto,
   URL,
   URLSearchParams,
@@ -74,6 +75,8 @@ context.chrome = {
 
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(path.resolve(__dirname, "../chrome/upload-store.js"), "utf8"), context);
+vm.runInContext(fs.readFileSync(path.resolve(__dirname, "../chrome/websocket-lifecycle.js"), "utf8"), context);
+for (const name of ["message-capture.js", "sse-capture.js"]) vm.runInContext(fs.readFileSync(path.resolve(__dirname, "../chrome", name), "utf8"), context);
 const workerPath = path.resolve(__dirname, "../chrome/service-worker.js");
 vm.runInContext(fs.readFileSync(workerPath, "utf8"), context);
 
@@ -363,7 +366,11 @@ async function main() {
   console.log("Chrome request metadata ordering tests passed");
 }
 
-main().catch(error => {
-  console.error(error);
-  process.exitCode = 1;
-});
+module.exports = {context, resetRecording};
+
+if (require.main === module) {
+  main().catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

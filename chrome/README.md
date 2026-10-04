@@ -218,8 +218,9 @@ does not reload extension source files.
   extension-message size limits. Available browser storage and memory, rather
   than Chrome's 64 MiB message limit, bound the practical recording size.
 - Exports a HAR locally; it does not yet stream to a running BreakTest process.
-- WebSocket handshakes may appear as HTTP requests, but individual WebSocket
-  frames are not converted into JMeter samplers.
+- Records WebSocket handshakes and incoming/outgoing text and binary messages
+  using the [WebSocket HAR extension](../docs/websocket-har.md). BreakTest import
+  and playback support will follow separately.
 - Opening normal Chrome DevTools can briefly detach the extension debugger
   session. The recorder retries the connection for several seconds and keeps
   already captured requests available for export if it cannot reconnect.
@@ -279,3 +280,10 @@ contexts exist, the current context's recording is preferred, then the most
 recent one. Chrome's shortcut can be reassigned at `chrome://extensions/shortcuts`
 if another extension already uses it. Pin the extension to see the red **REC**
 badge, which now appears only when the recorded tab is selected.
+
+### Streaming messages
+
+WebSocket messages include `_breaktest.transactionId` for the transaction active
+at capture time. SSE responses also include incoming messages and receive times
+in `_serverSentEvents`, covering native `EventSource` and `fetch` streams. See
+[the SSE HAR format](../docs/sse-har.md) for fields, limits, and capture diagnostics.
