@@ -8,12 +8,17 @@
 
 importScripts("har-export-store.js");
 importScripts("upload-store.js");
+importScripts("message-capture.js");
+importScripts("sse-capture.js");
+importScripts("websocket-lifecycle.js");
 
 const PROTOCOL_VERSION = "1.3";
 const MAX_BODY_CHARS = 2 * 1024 * 1024;
 const NETWORK_TOTAL_BUFFER_BYTES = 48 * 1024 * 1024;
 const NETWORK_RESOURCE_BUFFER_BYTES = 24 * 1024 * 1024;
 const MAX_VISIBLE_REQUESTS = 1000;
+const MAX_WEBSOCKET_MESSAGES = 10000;
+const MAX_WEBSOCKET_CHARS = 16 * 1024 * 1024;
 const SIDE_PANEL_PATH = "sidepanel.html";
 const INCOGNITO_LAUNCH_KEY = "pendingIncognitoLaunch";
 const RECORDING_DISCLOSURE_VERSION = 3;
@@ -74,6 +79,14 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     return;
   }
   const interruptedRecording = recording;
+  for (const [key, state] of recording.activeRequests) {
+    if (state.webSocket) {
+      state.webSocket.captureEnd = "debugger-detached";
+      state.incomplete = !state.finalized;
+      finalizeRequest(state, state.responseTimestamp ?? state.lastTimestamp);
+      recording.activeRequests.delete(key);
+    }
+  }
   recording.attached = false;
   recording.detachReason = reason;
   setRecordingBadge(false);
@@ -302,6 +315,9 @@ async function reconnectDebugger(interruptedRecording, reason) {
     try {
       await chrome.debugger.attach({tabId: interruptedRecording.tabId}, PROTOCOL_VERSION);
       interruptedRecording.attached = true;
+      // Rebinding after a detach needs fresh page hooks; old binding functions
+      // captured by the previous hooks no longer deliver debugger events.
+      interruptedRecording.webSocketLifecycle = undefined;
       await configureRootTarget(interruptedRecording.tabId);
       interruptedRecording.reconnecting = false;
       interruptedRecording.detachReason = null;
@@ -337,6 +353,11 @@ async function enableTarget(target) {
     maxTotalBufferSize: NETWORK_TOTAL_BUFFER_BYTES,
     maxResourceBufferSize: NETWORK_RESOURCE_BUFFER_BYTES
   });
+  if (recording) {
+    await enableWebSocketLifecycle(recording, target).catch(error => {
+      recording && (recording.webSocketLifecycleError = errorMessage(error));
+    });
+  }
   if (recording?.disableCache) {
     await chrome.debugger.sendCommand(target, "Network.setCacheDisabled", {cacheDisabled: true});
   }
@@ -374,6 +395,7 @@ function startTransactionInternal(name) {
   };
   recording.transactions.push(transaction);
   recording.currentTransaction = transaction;
+  globalThis.MessageCapture.startTransaction(recording, transaction);
   return transaction;
 }
 
@@ -426,6 +448,7 @@ function deleteTransaction(id, requestDisposition = "delete") {
     throw new Error(`There is no ${requestDisposition} transaction`);
   }
 
+  globalThis.MessageCapture.removeTransaction(recording, id, targetTransaction?.id);
   globalThis.UploadStore.removeTransaction(recording, id, targetTransaction?.id);
   recording.transactions = recording.transactions.filter(item => item.id !== id);
   if (targetTransaction) {
@@ -516,11 +539,13 @@ async function stopRecording() {
     throw new Error("No recording is active");
   }
   recording.stopping = true;
+  await disableWebSocketLifecycle(recording);
   await globalThis.UploadStore.settle(recording);
   await settlePendingTasks();
 
   for (const state of recording.activeRequests.values()) {
-    state.incomplete = true;
+    state.incomplete = !state.finalized;
+    state.sseParser?.finish();
     resolveUnknownExtraInfo(state);
     finalizeRequest(state, state.lastTimestamp || state.requestTimestamp);
   }
@@ -556,6 +581,7 @@ async function discardCurrentRecording() {
     return;
   }
   recording.stopping = true;
+  await disableWebSocketLifecycle(recording);
   if (recording.attached) {
     try {
       await chrome.debugger.detach({tabId: recording.tabId});
@@ -587,7 +613,26 @@ function trackTask(task) {
 }
 
 async function handleDebuggerEvent(source, method, params) {
+  if (recording && method === "Runtime.bindingCalled") {
+    webSocketLifecycleEvent(recording, source, params);
+    return;
+  }
+  if (!recording) return;
+  if (recording.stopping) {
+    // Capture is frozen, but in-flight handshake metadata must still reach
+    // existing entries while the debugger is being drained/detached.
+    const state = recording.requestChains.get(requestKey(source, params.requestId))?.attempts.at(-1);
+    const handshakeMetadata = ["Network.webSocketHandshakeResponseReceived", "Network.responseReceivedExtraInfo", "Network.responseReceived"].includes(method);
+    if (!handshakeMetadata || !state?.webSocket || state.discarded) return;
+  }
+  if (method.startsWith("Network.webSocket")) {
+    await webSocketEvent(source, method, params);
+    return;
+  }
   switch (method) {
+    case "Runtime.executionContextCreated":
+      await webSocketExecutionContext(recording, source, params.context);
+      break;
     case "Target.attachedToTarget": {
       const child = {tabId: source.tabId, sessionId: params.sessionId};
       await enableTarget(child);
@@ -604,8 +649,14 @@ async function handleDebuggerEvent(source, method, params) {
     case "Network.requestWillBeSentExtraInfo":
       requestExtraInfo(source, params);
       break;
+    case "Network.eventSourceMessageReceived":
+      eventSourceMessageReceived(source, params);
+      break;
+    case "Network.dataReceived":
+      sseDataReceived(source, params);
+      break;
     case "Network.responseReceived":
-      responseReceived(source, params);
+      await responseReceived(source, params);
       break;
     case "Network.responseReceivedExtraInfo":
       responseExtraInfo(source, params);
@@ -614,10 +665,133 @@ async function handleDebuggerEvent(source, method, params) {
       await loadingFinished(source, params);
       break;
     case "Network.loadingFailed":
-      loadingFailed(source, params);
+      await loadingFailed(source, params);
       break;
     default:
       break;
+  }
+}
+
+// HAR 1.2 has no WebSocket message model. Keep the handshake as a normal
+// entry and use the DevTools-compatible _webSocketMessages extension.
+async function webSocketEvent(source, method, params) {
+  const key = requestKey(source, params.requestId);
+  if (method === "Network.webSocketCreated") {
+    if (!/^wss?:/i.test(params.url || "") || recording.activeRequests.has(key)) {
+      return;
+    }
+    await requestWillBeSent(source, {
+      requestId: params.requestId,
+      timestamp: 0,
+      wallTime: Date.now() / 1000,
+      type: "WebSocket",
+      initiator: params.initiator,
+      request: {url: params.url, method: "GET"}
+    });
+    const state = recording.activeRequests.get(key);
+    if (state) {
+      state.webSocketMessages = [];
+      state.webSocket = {
+        formatVersion: 1,
+        closed: false,
+        closeInitiator: "unknown",
+        captureEnd: "recording-stopped",
+        messagesTruncated: false,
+        droppedMessages: 0
+      };
+      state.webSocketChars = 0;
+      // WebSocket events do not carry the HTTP hasExtraInfo flag. Reconcile
+      // separately delivered headers as they arrive, including after close.
+      state.hasExtraInfo = true;
+      reconcileExtraInfo(state.chain);
+      registerWebSocketLifecycle(recording, state);
+    }
+    return;
+  }
+  const state = recording.activeRequests.get(key)
+    || (method === "Network.webSocketHandshakeResponseReceived" ? recording.requestChains.get(key)?.attempts.at(-1) : null);
+  // Sockets opened before recording, or removed with a transaction, are ignored.
+  if (!state?.webSocket || state.discarded) {
+    return;
+  }
+  if (method === "Network.webSocketWillSendHandshakeRequest") {
+    state.requestTimestamp = params.timestamp;
+    state.lastTimestamp = params.timestamp;
+    state.startedDateTime = new Date(params.wallTime * 1000).toISOString();
+    state.request.headers = headersToHar(params.request?.headers);
+    state.webSocketWallTime = params.wallTime;
+    state.webSocketClockReady = true;
+  } else if (method === "Network.webSocketHandshakeResponseReceived") {
+    applyResponse(state, params.response || {}, params.timestamp);
+    state.response.httpVersion = /^HTTP\/\S+/.exec(params.response?.headersText || "")?.[0] || state.response.httpVersion;
+    state.request.httpVersion = state.response.httpVersion;
+    state.response.bodySize = 0;
+    state.response.content.size = 0;
+    state.failed = state.response.status >= 400;
+    // Display the handshake immediately; the message array remains live until
+    // the socket closes or recording stops. HAR timings describe the handshake.
+    finalizeRequest(state, params.timestamp);
+  } else if (method === "Network.webSocketFrameSent" || method === "Network.webSocketFrameReceived") {
+    if (!state.webSocketClockReady) {
+      return;
+    }
+    state.lastTimestamp = params.timestamp;
+    const frame = params.response;
+    if (!frame || typeof frame.payloadData !== "string") {
+      return;
+    }
+    // The first close frame starts the closing handshake; the reply must not
+    // overwrite its direction. Observe this even after payload limits are hit.
+    if (frame.opcode === 8 && state.webSocket.closeInitiatorSource !== "first-close-frame") {
+      delete state.webSocket.closeInitiatorInferred;
+      state.webSocket.closeInitiator = method === "Network.webSocketFrameSent" ? "client" : "server";
+      state.webSocket.closeInitiatorSource = "first-close-frame";
+      state.webSocket.closeInitiatedTime = state.webSocketWallTime + params.timestamp - state.requestTimestamp;
+    }
+    if (state.webSocketMessages.length >= MAX_WEBSOCKET_MESSAGES
+        || state.webSocketChars >= MAX_WEBSOCKET_CHARS) {
+      state.webSocket.messagesTruncated = true;
+      state.webSocket.droppedMessages++;
+      return;
+    }
+    const binary = frame.opcode !== 1;
+    let available = Math.min(MAX_BODY_CHARS, MAX_WEBSOCKET_CHARS - state.webSocketChars);
+    if (binary) {
+      available -= available % 4;
+    }
+    let data = frame.payloadData.slice(0, available);
+    // Do not split a UTF-16 surrogate pair when limiting a text payload.
+    if (!binary && data.length < frame.payloadData.length && /[\uD800-\uDBFF]$/.test(data)) {
+      data = data.slice(0, -1);
+    }
+    const truncated = data.length < frame.payloadData.length;
+    state.webSocket.messagesTruncated ||= truncated;
+    state.webSocketChars += data.length;
+    const message = {
+      type: method === "Network.webSocketFrameSent" ? "send" : "receive",
+      time: state.webSocketWallTime + params.timestamp - state.requestTimestamp,
+      opcode: frame.opcode,
+      data,
+      ...(binary ? {_encoding: "base64"} : {}),
+      ...(truncated ? {_truncated: true, _originalLength: frame.payloadData.length} : {})
+    };
+    if (globalThis.MessageCapture.tag(recording, message)) state.webSocketMessages.push(message);
+  } else if (method === "Network.webSocketFrameError") {
+    state.webSocket.error = String(params.errorMessage || "WebSocket error").slice(0, MAX_BODY_CHARS);
+    state.failed = true;
+    state.failureText = state.webSocket.error;
+    if (state.entry) {
+      state.entry._breaktest.failed = true;
+      state.entry._breaktest.failureText = state.failureText;
+    }
+  } else if (method === "Network.webSocketClosed") {
+    state.webSocket.closed = true;
+    state.webSocket.captureEnd = "socket-closed";
+    if (state.webSocketClockReady) {
+      state.webSocket.closedTime = state.webSocketWallTime + params.timestamp - state.requestTimestamp;
+    }
+    finalizeRequest(state, state.responseTimestamp ?? (state.webSocketClockReady ? params.timestamp : 0));
+    recording.activeRequests.delete(key);
   }
 }
 
@@ -657,6 +831,7 @@ async function requestWillBeSent(source, params) {
     source: {...source},
     requestId: params.requestId,
     requestTimestamp: params.timestamp,
+    wallTime: wallTimeMs / 1000,
     lastTimestamp: params.timestamp,
     startedDateTime: new Date(wallTimeMs).toISOString(),
     resourceType: params.type || "Other",
@@ -789,8 +964,10 @@ function applyRequestExtraInfo(state, extraInfo) {
 }
 
 function applyResponseExtraInfo(state, extraInfo) {
-  if (extraInfo.headers) {
-    state.response.headers = headersToHar(extraInfo.headers);
+  if (extraInfo.headers || (state.webSocket && extraInfo.headersText)) {
+    state.response.headers = state.webSocket
+      ? mergeHarHeaders(state.response.headers, webSocketResponseHeaders(extraInfo))
+      : headersToHar(extraInfo.headers);
     state.response.content.mimeType = headerValue(state.response.headers, "content-type")
       || state.response.content.mimeType;
     state.response.redirectURL = headerValue(state.response.headers, "location")
@@ -807,17 +984,72 @@ function requestExtraInfo(source, params) {
   reconcileExtraInfo(chain);
 }
 
-function responseReceived(source, params) {
+async function responseReceived(source, params) {
   const state = recording.activeRequests.get(requestKey(source, params.requestId));
   if (!state) {
     return;
   }
   applyResponse(state, params.response || {}, params.timestamp);
-  if (typeof params.hasExtraInfo === "boolean") {
+  if (!state.webSocket && typeof params.hasExtraInfo === "boolean") {
     state.hasExtraInfo = params.hasExtraInfo;
     reconcileExtraInfo(state.chain);
   }
   state.resourceType = params.type || state.resourceType;
+  if (state.resourceType === "EventSource") {
+    globalThis.SseCapture.init(state, "chrome.debugger.EventSource");
+  } else if (state.response.content.mimeType.split(";")[0].trim().toLowerCase() === "text/event-stream" && !state.sse) {
+    globalThis.SseCapture.init(state, "chrome.debugger.response-stream");
+    state.sseParser = globalThis.SseCapture.parser(recording, state, headerValue(state.request.headers, "last-event-id") || "");
+    state.ssePendingChunks = [];
+    state.ssePendingChars = 0;
+    state.sseStreamTask = (async () => {
+      try {
+        const result = await chrome.debugger.sendCommand(source, "Network.streamResourceContent", {requestId: params.requestId});
+        if (!recording || state.discarded || state.finalized) return;
+        if (result.bufferedData) {
+          state.sse.bufferedTimestampEstimated = true;
+          feedSseBase64(state, result.bufferedData, Date.now() / 1000);
+        }
+        for (const chunk of state.ssePendingChunks) feedSseBase64(state, chunk.data, chunk.time);
+      } catch (error) {
+        state.sse.captureIncomplete = true;
+        state.sse.captureError = errorMessage(error);
+      } finally {
+        state.ssePendingChunks = null;
+      }
+    })();
+    await state.sseStreamTask;
+  }
+}
+
+function feedSseBase64(state, data, time) {
+  const binary = atob(data);
+  const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+  state.sseParser.feed(bytes, time);
+}
+
+function sseDataReceived(source, params) {
+  const state = recording.activeRequests.get(requestKey(source, params.requestId));
+  if (!state?.sseParser || state.discarded || typeof params.data !== "string") return;
+  const time = state.wallTime + params.timestamp - state.requestTimestamp;
+  if (state.ssePendingChunks) {
+    if (state.ssePendingChars + params.data.length > MAX_WEBSOCKET_CHARS) {
+      state.sse.captureIncomplete = true;
+      return;
+    }
+    state.ssePendingChars += params.data.length;
+    state.ssePendingChunks.push({data: params.data, time});
+  } else feedSseBase64(state, params.data, time);
+}
+
+function eventSourceMessageReceived(source, params) {
+  const state = recording.activeRequests.get(requestKey(source, params.requestId));
+  if (!state || state.discarded || typeof params.data !== "string") return;
+  globalThis.SseCapture.init(state, "chrome.debugger.EventSource");
+  globalThis.SseCapture.append(recording, state, {
+    type: "receive", time: state.wallTime + params.timestamp - state.requestTimestamp,
+    eventName: params.eventName || "message", eventId: params.eventId || "", data: params.data
+  });
 }
 
 function responseExtraInfo(source, params) {
@@ -829,9 +1061,12 @@ function responseExtraInfo(source, params) {
 async function loadingFinished(source, params) {
   const key = requestKey(source, params.requestId);
   const state = recording.activeRequests.get(key);
-  if (!state) {
+  if (!state || state.webSocket) {
     return;
   }
+  if (state.sseStreamTask) await state.sseStreamTask;
+  state.sseParser?.finish();
+  if (state.sse) state.sse.captureEnd = "stream-ended";
   state.lastTimestamp = params.timestamp;
   state.encodedDataLength = params.encodedDataLength || 0;
   state.response.bodySize = state.encodedDataLength;
@@ -867,12 +1102,15 @@ async function getResponseBodyWithRetry(source, requestId) {
   throw lastError || new Error("Chrome did not make the response body available");
 }
 
-function loadingFailed(source, params) {
+async function loadingFailed(source, params) {
   const key = requestKey(source, params.requestId);
   const state = recording.activeRequests.get(key);
   if (!state) {
     return;
   }
+  if (state.sseStreamTask) await state.sseStreamTask;
+  state.sseParser?.finish();
+  if (state.sse) state.sse.captureEnd = "request-failed";
   state.failed = true;
   state.failureText = params.errorText || "Request failed";
   state.canceled = Boolean(params.canceled);
@@ -885,21 +1123,32 @@ function loadingFailed(source, params) {
 function applyResponse(state, response, timestamp) {
   state.responseTimestamp = timestamp;
   state.lastTimestamp = timestamp;
-  state.response = {
+  const responseHeaders = state.webSocket
+    ? mergeHarHeaders(state.response.headers, webSocketResponseHeaders(response))
+    : headersToHar(response.headers);
+  const nextResponse = {
     status: response.status || 0,
     statusText: response.statusText || "",
     httpVersion: normalizeHttpVersion(response.protocol),
-    headers: headersToHar(response.headers),
+    headers: responseHeaders,
     cookies: [],
     content: {
       size: Number.isFinite(response.encodedDataLength) ? response.encodedDataLength : 0,
-      mimeType: response.mimeType || headerValue(headersToHar(response.headers), "content-type") || ""
+      mimeType: response.mimeType || headerValue(responseHeaders, "content-type") || ""
     },
-    redirectURL: headerValue(headersToHar(response.headers), "location") || "",
+    redirectURL: headerValue(responseHeaders, "location") || "",
     headersSize: -1,
     bodySize: Number.isFinite(response.encodedDataLength) ? response.encodedDataLength : -1,
     _transferSize: Number.isFinite(response.encodedDataLength) ? response.encodedDataLength : 0
   };
+  if (state.webSocket) {
+    nextResponse.httpVersion ||= state.response.httpVersion;
+    // The handshake entry is already visible/exportable while the socket lives.
+    // Preserve its object reference so late metadata reaches the HAR too.
+    Object.assign(state.response, nextResponse);
+  } else {
+    state.response = nextResponse;
+  }
   state.request.httpVersion = normalizeHttpVersion(response.protocol) || state.request.httpVersion;
   state.serverIPAddress = response.remoteIPAddress || "";
   state.connection = response.connectionId == null ? "" : String(response.connectionId);
@@ -966,9 +1215,18 @@ function finalizeRequest(state, finishedTimestamp) {
       failureText: state.failureText || ""
     }
   };
+  if (state.sse) {
+    entry._serverSentEvents = state.serverSentEvents;
+    entry._breaktest.sse = state.sse;
+  }
+  if (state.webSocket) {
+    entry._webSocketMessages = state.webSocketMessages;
+    entry._breaktest.webSocket = state.webSocket;
+  }
   if (!entry._fromCache) {
     delete entry._fromCache;
   }
+  state.entry = entry;
   recording.entries.push(entry);
 
   const summary = {
@@ -1016,6 +1274,7 @@ function buildHar(session) {
         recordedWith: "chrome.debugger",
         startedDateTime: new Date(session.startedAt).toISOString(),
         tabTitle: session.tabTitle,
+        ...(session.webSocketLifecycleError ? {webSocketLifecycleError: session.webSocketLifecycleError} : {}),
         ...(uploadCapture ? {uploadCapture} : {}),
         transactions: session.transactions
       }
@@ -1060,6 +1319,29 @@ function emptyResponse() {
     headersSize: -1,
     bodySize: -1
   };
+}
+
+function mergeHarHeaders(previous, current) {
+  const names = new Set(current.map(header => header.name.toLowerCase()));
+  return [...previous.filter(header => !names.has(header.name.toLowerCase())), ...current];
+}
+
+function webSocketResponseHeaders(response) {
+  const rawHeaders = [];
+  if (typeof response.headersText === "string") {
+    for (const line of response.headersText.split(/\r?\n/)) {
+      if (/^HTTP\/\S+\s+\d{3}/i.test(line)) continue;
+      if (!line.trim()) break;
+      if (/^[ \t]/.test(line) && rawHeaders.length) {
+        rawHeaders[rawHeaders.length - 1].value += ` ${line.trim()}`;
+        continue;
+      }
+      const colon = line.indexOf(":");
+      if (colon > 0) rawHeaders.push({name: line.slice(0, colon).trim(), value: line.slice(colon + 1).trim()});
+    }
+  }
+  // Raw headers retain repeated fields; the structured map fills any omissions.
+  return mergeHarHeaders(headersToHar(response.headers), rawHeaders);
 }
 
 function headersToHar(headers) {
@@ -1159,7 +1441,7 @@ function recorderStatus() {
     currentTransaction: recording.currentTransaction,
     transactions: recording.transactions,
     requestCount: recording.entries.length,
-    pendingCount: recording.activeRequests.size,
+    pendingCount: [...recording.activeRequests.values()].filter(state => !state.finalized).length,
     capturedBodyChars: recording.capturedBodyChars,
     incognito: recording.incognito,
     cacheDisabled: recording.disableCache,
@@ -1172,7 +1454,7 @@ function isRecordableUrl(url) {
 }
 
 function isCapturableRequestUrl(url) {
-  return typeof url === "string" && /^https?:/i.test(url);
+  return typeof url === "string" && /^(https?|wss?):/i.test(url);
 }
 
 function normalizeStartUrl(value) {

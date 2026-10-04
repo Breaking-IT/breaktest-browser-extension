@@ -44,7 +44,7 @@ required.
 - The extension processes recorded traffic locally and does not send it to
   Breaking IT or a third party.
 - The package contains no analytics, advertising, telemetry, remote scripts,
-  dynamic code execution, or native messaging.
+  remotely supplied executable code, or native messaging.
 - Active recorded content is held in extension memory. When recording stops,
   the completed HAR is staged as a browser-local IndexedDB Blob so large files
   do not cross extension-message limits and an interrupted save can be retried.
@@ -100,3 +100,17 @@ capture. Content scripts may load on HTTP/HTTPS sites, but read file bytes only
 when the background authorizes capture for the user-selected recording tab.
 Selected files may never be submitted; the disclosure explicitly states this.
 Captured bytes remain local. The recording notice version is incremented.
+
+## Changes in 1.3.0
+
+Records WebSocket handshakes, text/binary messages, and disconnect metadata.
+Each WebSocket or SSE message includes its capture timestamp and active
+transaction ID, including when a connection spans multiple transactions.
+Records incoming SSE events from EventSource and fetch text/event-stream
+responses, including named events and multiline data. Capture limits and missing
+coverage are explicitly marked in the exported HAR.
+
+Chromium uses packaged WebSocket lifecycle instrumentation through the debugger
+in addition to Network events. Firefox uses a packaged page WebSocket API hook
+for messages and native webRequest for handshake headers and SSE response bytes.
+No remote code is fetched or executed, and captured data stays local.

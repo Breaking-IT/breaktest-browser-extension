@@ -253,7 +253,7 @@ def validate() -> list[str]:
         errors.append("chrome: a manifest-level side panel would make the recorder global")
 
     firefox_background_scripts = manifests["firefox"].get("background", {}).get("scripts", [])
-    if firefox_background_scripts[:3] != ["har-export-store.js", "upload-store.js", "background.js"]:
+    if firefox_background_scripts != ["har-export-store.js", "upload-store.js", "message-capture.js", "sse-capture.js", "websocket-store.js", "background.js"]:
         errors.append("firefox: IndexedDB HAR export support must load before the recorder background")
 
     if not (ROOT / "PRIVACY.md").is_file():
@@ -285,7 +285,25 @@ def validate() -> list[str]:
     )
     if controls_test.returncode:
         errors.append(f"Recorder controls tests failed:\n{controls_test.stderr or controls_test.stdout}")
-    for filename in ("upload-store.js", "upload-capture.js"):
+    websocket_test = subprocess.run(
+        ["node", str(ROOT / "scripts" / "test_websocket_capture.js")],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    if websocket_test.returncode:
+        errors.append(f"WebSocket capture tests failed:\n{websocket_test.stderr or websocket_test.stdout}")
+    firefox_websocket_test = subprocess.run(
+        ["node", str(ROOT / "scripts" / "test_firefox_websocket_capture.js")],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    if firefox_websocket_test.returncode:
+        errors.append(f"Firefox WebSocket capture tests failed:\n{firefox_websocket_test.stderr or firefox_websocket_test.stdout}")
+    stream_test = subprocess.run(
+        ["node", str(ROOT / "scripts" / "test_stream_messages.js")],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    if stream_test.returncode:
+        errors.append(f"Stream message tests failed:\n{stream_test.stderr or stream_test.stdout}")
+    for filename in ("upload-store.js", "upload-capture.js", "message-capture.js", "sse-capture.js"):
         if (ROOT / "chrome" / filename).read_bytes() != (ROOT / "firefox" / filename).read_bytes():
             errors.append(f"Upload capture sources differ between browsers: {filename}")
     return errors

@@ -8,6 +8,9 @@ const {webcrypto: crypto} = require("node:crypto");
 async function test(browser) {
   const context = vm.createContext({crypto, setTimeout, clearTimeout});
   vm.runInContext(fs.readFileSync(path.join(__dirname, "..", browser, "upload-store.js"), "utf8"), context);
+  if (browser === "firefox") {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, "../firefox/websocket-store.js"), "utf8"), context);
+  }
   const store = context.UploadStore;
   const worker = fs.readFileSync(path.join(__dirname, "..", browser,
     browser === "chrome" ? "service-worker.js" : "background.js"), "utf8");

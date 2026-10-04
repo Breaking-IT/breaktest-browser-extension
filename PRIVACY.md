@@ -131,3 +131,15 @@ For non-sensitive privacy questions, use the
 [BreakTest Browser Recorder issue tracker](https://github.com/Breaking-IT/breaktest-browser-extension/issues).
 For sensitive security or privacy reports, follow the private reporting process
 in [SECURITY.md](SECURITY.md).
+
+### WebSocket recording
+
+Recordings also include WebSocket handshake headers and incoming and outgoing
+message payloads (including binary content). These may contain the same kinds
+of credentials and personal data as HTTP traffic and stay in the local HAR
+under the same retention and export rules. In Firefox, an isolated content script
+hooks the page's WebSocket API to capture message payloads. It sends payloads
+directly to the extension background only after the background authorizes capture
+for the recorded tab and session. It does not use a page-message relay. Chrome and Edge also install a temporary
+WebSocket lifecycle hook to observe close requests and close events; handshake
+and message payload capture continues to use debugger network events.

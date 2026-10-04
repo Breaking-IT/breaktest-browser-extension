@@ -31,6 +31,38 @@ When removing a transaction, its requests can be removed too or reassigned to
 the previous or next transaction. The active transaction remains protected
 until a newer transaction is started.
 
+## WebSocket recording
+
+Chrome, Edge, and Firefox record `ws://` and `wss://` connections created during
+recording, including handshake headers/status and incoming/outgoing text and
+binary messages. BreakTest WebSocket import/playback will be implemented separately.
+
+Chrome and Edge use debugger events. Firefox combines native handshake capture
+with a hook on the page's WebSocket API; it captures messages from documents and
+frames, but cannot capture messages from worker-created sockets or raw control
+frames. Handshakes without message capture are explicitly marked in the HAR.
+
+Each connection is one HAR entry owned by the transaction in which it opened.
+The handshake appears in the request list immediately; subsequent messages are
+added to that entry until the connection closes or recording stops. Every message
+has its own `_breaktest.transactionId`, based on its capture timestamp, so one
+connection can carry messages for several transactions. Reassigning a transaction
+updates its message IDs. Deleting its requests also removes its messages; deleting
+the opening request removes the entire connection.
+
+See [the WebSocket HAR format](docs/websocket-har.md) for message fields,
+encoding, capture limits, and lifecycle metadata.
+
+## Server-sent events (SSE)
+
+Chrome, Edge, and Firefox capture incoming SSE messages from `EventSource` and
+`fetch` responses with `Content-Type: text/event-stream`. The HTTP HAR entry stores
+`_serverSentEvents`, including payload, event name, event ID, receive timestamp,
+and per-message transaction ID. Named events, multiline data, and split UTF-8
+chunks are supported. BreakTest playback is separate from this recorder change.
+
+See [the SSE HAR format](docs/sse-har.md) for capture limits and timestamp precision.
+
 ## Development
 
 Keep the versions in both manifests aligned when releasing a recorder update.
