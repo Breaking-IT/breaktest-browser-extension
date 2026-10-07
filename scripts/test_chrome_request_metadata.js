@@ -357,7 +357,169 @@ async function testRecordingLocator() {
   }
 }
 
+// Exercise the debugger dispatcher, with no earlier URL history in the recording.
+async function testCacheMetadata() {
+  const originalCommand = context.chrome.debugger.sendCommand;
+  let bodyResult = {body: "é🐈", base64Encoded: false};
+  context.chrome.debugger.sendCommand = async () => bodyResult;
+  const event = (method, params, sessionId) => vm.runInContext(
+    `handleDebuggerEvent(${JSON.stringify({tabId: 1, ...(sessionId ? {sessionId} : {})})},
+      ${JSON.stringify(`Network.${method}`)}, ${JSON.stringify(params)})`, context);
+  const start = (requestId, sessionId, extra = {}) => event("requestWillBeSent", {
+    requestId, timestamp: 1, wallTime: 1784557822, type: "Image",
+    request: {method: "GET", url: "https://example.test/pre-cached.png", headers: {Referer: "https://example.test/"}},
+    ...extra
+  }, sessionId);
+  const response = (requestId, sessionId, extra = {}) => event("responseReceived", {
+    requestId, timestamp: 1.00002, hasExtraInfo: false,
+    response: {status: 200, protocol: "h2", headers: {}, encodedDataLength: 1182,
+      remoteIPAddress: "127.0.0.1", connectionId: 7,
+      timing: {dnsStart: -1, dnsEnd: -1, connectStart: -1, connectEnd: -1,
+        sslStart: -1, sslEnd: -1, sendStart: 0, sendEnd: 0, receiveHeadersEnd: 30.125},
+      ...extra}
+  }, sessionId);
+  const finish = (requestId, sessionId, encodedDataLength = 0) => event("loadingFinished", {
+    requestId, timestamp: 1.000045, encodedDataLength
+  }, sessionId);
+  const entries = () => JSON.parse(vm.runInContext("JSON.stringify(buildHar(recording).log.entries)", context));
+  const assertLocal = (entry, marker) => {
+    assert.strictEqual(entry._fromCache, marker);
+    assert.strictEqual(entry.response._transferSize, 0);
+    assert.strictEqual(entry.response.bodySize, 0);
+    assert.strictEqual(entry.response.content.size, 6);
+    assert.strictEqual(entry._breaktest.timingSource, "cache");
+    assert.strictEqual(entry.timings.wait, 0);
+    assert.strictEqual(entry.timings.receive, 0);
+    assert.strictEqual(entry.timings.send, 0);
+    assert.strictEqual(entry.timings.dns, -1);
+    assert.strictEqual(entry.timings.connect, -1);
+    assert.strictEqual(entry.timings.ssl, -1);
+    assert.strictEqual(entry.timings.blocked, entry.time);
+    assert.strictEqual(entry.serverIPAddress, "");
+    assert.strictEqual(entry.connection, "");
+  };
+  try {
+    for (const cacheAfterResponse of [false, true]) {
+      resetRecording();
+      await start("cached");
+      if (!cacheAfterResponse) await event("requestServedFromCache", {requestId: "cached"});
+      await response("cached");
+      if (cacheAfterResponse) await event("requestServedFromCache", {requestId: "cached"});
+      await finish("cached");
+      assertLocal(entries()[0], "memory");
+      assert.strictEqual(entries().length, 1);
+    }
+    for (const alsoCacheEvent of [false, true]) {
+      resetRecording();
+      await start("disk");
+      if (alsoCacheEvent) await event("requestServedFromCache", {requestId: "disk"});
+      await response("disk", undefined, {fromDiskCache: true});
+      await finish("disk");
+      assertLocal(entries()[0], "disk");
+    }
+    resetRecording();
+    await start("cache-missing-size");
+    await event("requestServedFromCache", {requestId: "cache-missing-size"});
+    await response("cache-missing-size");
+    await event("loadingFinished", {requestId: "cache-missing-size", timestamp: 1.000045});
+    assert.strictEqual(entries()[0]._fromCache, "memory");
+    assert.strictEqual(entries()[0].response._transferSize, -1);
+    resetRecording();
+    await start("worker");
+    await response("worker", undefined, {fromServiceWorker: true});
+    await finish("worker", undefined, 42);
+    assert.strictEqual(entries()[0]._fromCache, "service-worker");
+    assert.strictEqual(entries()[0].response._transferSize, 42);
+    assert.strictEqual(entries()[0]._breaktest.timingSource, "network");
+
+    // Short duration, zero transfer/body, or a previously cached URL proves nothing.
+    for (const finalSize of [0, 1500, null]) {
+      resetRecording();
+      await start("network");
+      await response("network", undefined, {timing: undefined});
+      await finish("network", undefined, finalSize);
+      const entry = entries()[0];
+      assert.ok(!("_fromCache" in entry));
+      assert.strictEqual(entry.response._transferSize, finalSize ?? -1);
+      assert.strictEqual(entry.response.bodySize, finalSize ?? -1);
+      assert.strictEqual(entry.response.content.size, 6);
+      assert.strictEqual(entry._breaktest.timingSource, "response-events");
+    }
+    resetRecording();
+    await start("ordinary");
+    await response("ordinary");
+    await event("loadingFinished", {requestId: "ordinary", timestamp: 1.05, encodedDataLength: 1500});
+    assert.strictEqual(entries()[0].timings.wait, 30.125);
+    assert.strictEqual(entries()[0]._breaktest.timingSource, "network");
+
+    // Full decoded size, including base64 padding and text truncated for export.
+    for (const body of ["", "YQ==", "YWI=", "YWJj"]) {
+      resetRecording();
+      bodyResult = {body, base64Encoded: true};
+      await start("binary");
+      await response("binary");
+      await finish("binary");
+      assert.strictEqual(entries()[0].response.content.size, Buffer.from(body, "base64").length);
+    }
+    resetRecording();
+    bodyResult = {body: "é".repeat(vm.runInContext("MAX_BODY_CHARS + 1", context)), base64Encoded: false};
+    await start("truncated");
+    await response("truncated");
+    await finish("truncated");
+    assert.strictEqual(entries()[0].response.content.size, Buffer.byteLength(bodyResult.body));
+    assert.strictEqual(entries()[0]._breaktest.bodyTruncated, true);
+    resetRecording();
+    bodyResult = {};
+    await start("unknown");
+    await response("unknown", undefined, {encodedDataLength: undefined});
+    await event("loadingFinished", {requestId: "unknown", timestamp: 1.000045});
+    assert.strictEqual(entries()[0].response.content.size, -1);
+    assert.strictEqual(entries()[0].response._transferSize, -1);
+
+    bodyResult = {body: "é🐈", base64Encoded: false};
+    resetRecording();
+    await start("shared");
+    await start("shared", "child");
+    await start("other");
+    await event("requestServedFromCache", {requestId: "shared"}, "child");
+    await event("requestServedFromCache", {requestId: "unseen"});
+    for (const [id, session] of [["shared", undefined], ["shared", "child"], ["other", undefined], ["unseen", undefined]]) {
+      if (id === "unseen") await start(id);
+      await response(id, session);
+      await finish(id, session);
+    }
+    assert.deepStrictEqual(entries().map(entry => entry._fromCache), [undefined, "memory", undefined, undefined]);
+
+    // Cache events belong only to the current redirect attempt, in either direction.
+    for (const cachedAttempt of [0, 1]) {
+      resetRecording();
+      await start("redirect-cache");
+      if (cachedAttempt === 0) await event("requestServedFromCache", {requestId: "redirect-cache"});
+      await start("redirect-cache", undefined, {timestamp: 1.00001,
+        redirectHasExtraInfo: false,
+        redirectResponse: {status: 302, headers: {location: "/final"}, encodedDataLength: 1182}});
+      if (cachedAttempt === 1) await event("requestServedFromCache", {requestId: "redirect-cache"});
+      await response("redirect-cache");
+      await finish("redirect-cache");
+      await vm.runInContext("Promise.all([...recording.pendingTasks])", context);
+      const result = entries();
+      assert.strictEqual(result.length, 2);
+      assert.strictEqual(result[cachedAttempt]._fromCache, "memory");
+      assert.ok(!("_fromCache" in result[1 - cachedAttempt]));
+    }
+    // A new recording does not inherit cache information from a previous session.
+    resetRecording();
+    await start("redirect-cache");
+    await response("redirect-cache");
+    await finish("redirect-cache");
+    assert.ok(!("_fromCache" in entries()[0]));
+  } finally {
+    context.chrome.debugger.sendCommand = originalCommand;
+  }
+}
+
 async function main() {
+  await testCacheMetadata();
   await testRecordingLocator();
   await testNavigationFailureKeepsRecording();
   await testExtraInfoBeforeRequest();

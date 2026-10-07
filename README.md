@@ -31,6 +31,20 @@ When removing a transaction, its requests can be removed too or reassigned to
 the previous or next transaction. The active transaction remains protected
 until a newer transaction is started.
 
+## Chrome and Edge cache metadata
+
+HAR entries use `_fromCache: "memory"` for debugger cache events, `"disk"` for
+disk-cache responses, and `"service-worker"` for service-worker responses. Cache
+detection uses browser signals for each request attempt, including resources
+cached before recording started; it does not depend on URL history or duration.
+
+For local cache hits, network timing phases are zero or unavailable and elapsed
+time is recorded as `blocked`, with `_breaktest.timingSource: "cache"`. Original
+server/connection metadata is cleared. `_transferSize` uses the final debugger
+byte count, including zero; a missing final count is `-1`. `content.size` measures
+decoded body bytes before text truncation (UTF-8 for text), independently of
+transferred bytes, and is `-1` when the body size is unknown.
+
 ## WebSocket recording
 
 Chrome, Edge, and Firefox record `ws://` and `wss://` connections created during

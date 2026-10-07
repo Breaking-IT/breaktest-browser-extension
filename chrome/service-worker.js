@@ -646,6 +646,13 @@ async function handleDebuggerEvent(source, method, params) {
     case "Network.requestWillBeSent":
       await requestWillBeSent(source, params);
       break;
+    case "Network.requestServedFromCache": {
+      // CDP emits this for the active attempt, including resources cached before
+      // recording. Never carry it forward by URL or across redirect attempts.
+      const state = recording.activeRequests.get(requestKey(source, params.requestId));
+      if (state && !state.finalized && !state.discarded) state.servedFromCache = true;
+      break;
+    }
     case "Network.requestWillBeSentExtraInfo":
       requestExtraInfo(source, params);
       break;
@@ -849,7 +856,7 @@ async function requestWillBeSent(source, params) {
     },
     response: emptyResponse(),
     responseTimestamp: null,
-    encodedDataLength: 0,
+    encodedDataLength: null,
     bodyTruncated: false,
     failed: false,
     incomplete: false
@@ -1068,8 +1075,11 @@ async function loadingFinished(source, params) {
   state.sseParser?.finish();
   if (state.sse) state.sse.captureEnd = "stream-ended";
   state.lastTimestamp = params.timestamp;
-  state.encodedDataLength = params.encodedDataLength || 0;
-  state.response.bodySize = state.encodedDataLength;
+  // Zero is authoritative; absent byte counts remain unknown. The response
+  // event only reports bytes received so far, not the final transfer size.
+  state.encodedDataLength = Number.isFinite(params.encodedDataLength) ? params.encodedDataLength : null;
+  state.response.bodySize = state.encodedDataLength ?? -1;
+  state.response._transferSize = state.encodedDataLength ?? -1;
   if (state.postDataTask) {
     await state.postDataTask;
   }
@@ -1133,13 +1143,13 @@ function applyResponse(state, response, timestamp) {
     headers: responseHeaders,
     cookies: [],
     content: {
-      size: Number.isFinite(response.encodedDataLength) ? response.encodedDataLength : 0,
+      size: state.webSocket ? 0 : -1, // Decoded bytes come from the body, not transfer bytes.
       mimeType: response.mimeType || headerValue(responseHeaders, "content-type") || ""
     },
     redirectURL: headerValue(responseHeaders, "location") || "",
     headersSize: -1,
     bodySize: Number.isFinite(response.encodedDataLength) ? response.encodedDataLength : -1,
-    _transferSize: Number.isFinite(response.encodedDataLength) ? response.encodedDataLength : 0
+    _transferSize: Number.isFinite(response.encodedDataLength) ? response.encodedDataLength : -1
   };
   if (state.webSocket) {
     nextResponse.httpVersion ||= state.response.httpVersion;
@@ -1166,6 +1176,10 @@ function captureBody(state, result) {
     state.bodyUnavailableReason = "Chrome returned no response body";
     return;
   }
+  // Measure the complete decoded body before applying the export text limit.
+  state.response.content.size = result.base64Encoded
+    ? Math.floor(result.body.length * 3 / 4) - (result.body.endsWith("==") ? 2 : result.body.endsWith("=") ? 1 : 0)
+    : new TextEncoder().encode(result.body).byteLength;
   const available = MAX_BODY_CHARS;
   const safeAvailable = result.base64Encoded ? available - (available % 4) : available;
   if (safeAvailable <= 0) {
@@ -1188,6 +1202,12 @@ function finalizeRequest(state, finishedTimestamp) {
   state.finalized = true;
   const end = Number.isFinite(finishedTimestamp) ? finishedTimestamp : state.requestTimestamp;
   const totalMs = Math.max((end - state.requestTimestamp) * 1000, 0);
+  const localCache = isLocalCache(state);
+  if (localCache) {
+    // Cached response metadata can describe the original network fetch.
+    state.response.bodySize = 0;
+    state.response._transferSize = state.encodedDataLength ?? -1;
+  }
   const entry = {
     startedDateTime: state.startedDateTime,
     time: totalMs,
@@ -1195,10 +1215,10 @@ function finalizeRequest(state, finishedTimestamp) {
     response: state.response,
     cache: {},
     timings: buildTimings(state, totalMs),
-    serverIPAddress: state.serverIPAddress || "",
-    connection: state.connection || "",
+    serverIPAddress: localCache ? "" : state.serverIPAddress || "",
+    connection: localCache ? "" : state.connection || "",
     _resourceType: state.resourceType,
-    _fromCache: state.fromDiskCache ? "disk" : (state.fromServiceWorker ? "service-worker" : undefined),
+    _fromCache: state.fromDiskCache ? "disk" : (state.fromServiceWorker ? "service-worker" : (state.servedFromCache ? "memory" : undefined)),
     _breaktest: {
       transactionId: state.transaction.id,
       transactionName: state.transaction.name,
@@ -1207,8 +1227,8 @@ function finalizeRequest(state, finishedTimestamp) {
       bodyTruncated: state.bodyTruncated,
       bodyUnavailable: Boolean(state.bodyUnavailable),
       bodyUnavailableReason: state.bodyUnavailableReason || "",
-      timingSource: state.timing ? "network" : "response-events",
-      timingsAvailable: Boolean(state.timing) || Number.isFinite(state.responseTimestamp),
+      timingSource: localCache ? "cache" : state.timing ? "network" : "response-events",
+      timingsAvailable: localCache || Boolean(state.timing) || Number.isFinite(state.responseTimestamp),
       requestBodyUnavailable: Boolean(state.requestBodyUnavailable),
       failed: state.failed,
       incomplete: state.incomplete,
@@ -1282,7 +1302,16 @@ function buildHar(session) {
   };
 }
 
+function isLocalCache(state) {
+  // A service worker can itself fetch from the network; keep its timing data.
+  return state.fromDiskCache || (state.servedFromCache && !state.fromServiceWorker);
+}
+
 function buildTimings(state, totalMs) {
+  if (isLocalCache(state)) {
+    // Account for local elapsed time without inventing network phases.
+    return {blocked: totalMs, dns: -1, connect: -1, ssl: -1, send: 0, wait: 0, receive: 0};
+  }
   const timing = state.timing;
   if (!timing) {
     const beforeResponse = Number.isFinite(state.responseTimestamp)
@@ -1314,7 +1343,7 @@ function emptyResponse() {
     httpVersion: "",
     headers: [],
     cookies: [],
-    content: {size: 0, mimeType: ""},
+    content: {size: -1, mimeType: ""},
     redirectURL: "",
     headersSize: -1,
     bodySize: -1
