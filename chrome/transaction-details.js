@@ -15,6 +15,81 @@ const transactionId = new URLSearchParams(location.search).get("transaction");
 let transaction = null;
 let requests = [];
 let loadSequence = 0;
+let timelineSpan = 1;
+let showCached = false;
+const cacheToggle = document.querySelector("#cache-toggle");
+const tooltip = document.querySelector("#request-timing-tooltip");
+cacheToggle.addEventListener("click", () => { showCached = !showCached; render(); });
+document.querySelector(".request-detail-table-wrap").addEventListener("scroll", clearHover);
+document.addEventListener("keydown", event => { if (event.key === "Escape") clearHover(); });
+window.addEventListener("resize", clearHover);
+
+function showTimingDetails(cell) {
+  tooltip.replaceChildren();
+  const heading = document.createElement("strong");
+  heading.textContent = cell.dataset.path;
+  const details = document.createElement("dl");
+  for (const [label, value] of JSON.parse(cell.dataset.details)) {
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const description = document.createElement("dd");
+    description.textContent = value;
+    details.append(term, description);
+  }
+  tooltip.append(heading, details);
+  tooltip.hidden = false;
+  const bounds = cell.getBoundingClientRect();
+  tooltip.style.left = `${Math.max(8, Math.min(bounds.left, innerWidth - tooltip.offsetWidth - 8))}px`;
+  tooltip.style.top = `${Math.max(8, bounds.bottom + tooltip.offsetHeight + 12 < innerHeight ? bounds.bottom + 8 : bounds.top - tooltip.offsetHeight - 8)}px`;
+}
+function shortUrl(value) {
+  try { const url = new URL(value); return `${url.pathname}${url.search}`; }
+  catch { return value || "—"; }
+}
+const timeline = document.querySelector("#waterfall-axis");
+const table = document.querySelector(".request-detail-table");
+const hoverLabel = document.querySelector("#waterfall-hover-time");
+
+table.addEventListener("pointermove", event => {
+  const cell = event.target.closest(".waterfall-cell, #waterfall-axis");
+  if (!cell) { clearHover(); return; }
+  if (cell.dataset.details) showTimingDetails(cell);
+  else tooltip.hidden = true;
+  const bounds = cell.getBoundingClientRect();
+  const fraction = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
+  table.style.setProperty("--hover-position", `${fraction * 100}%`);
+  table.classList.add("waterfall-hovering");
+  hoverLabel.textContent = `${formatResponseTime(fraction * timelineSpan)} since first request`;
+});
+table.addEventListener("pointerleave", clearHover);
+function clearHover() {
+  tooltip.hidden = true;
+  table.classList.remove("waterfall-hovering");
+  hoverLabel.textContent = "Hover over the waterfall to inspect elapsed time";
+}
+
+function isCacheOnly(request) {
+  // Revalidation and failures still belong in the network view. Service workers
+  // may fetch from the network, so their responses are not assumed cache-only.
+  return ["disk", "memory", "firefox-cache"].includes(request.fromCache)
+    && !request.failed && request.status !== 304 && request.status < 400;
+}
+
+function renderAxis(span) {
+  timeline.replaceChildren();
+  const target = span / 5;
+  const magnitude = 10 ** Math.floor(Math.log10(target));
+  const step = [1, 2, 5, 10].map(value => value * magnitude).find(value => value >= target);
+  table.style.setProperty("--grid-step", `${step / span * 100}%`);
+  for (let time = 0; time <= span; time += step) {
+    const tick = document.createElement("span");
+    tick.className = "waterfall-tick";
+    tick.style.left = `${time / span * 100}%`;
+    if (time / span > 0.9) tick.style.transform = "translateX(-100%)";
+    tick.textContent = formatResponseTime(time);
+    timeline.append(tick);
+  }
+}
 
 chrome.runtime.onMessage.addListener(message => {
   switch (message.type) {
@@ -26,6 +101,7 @@ chrome.runtime.onMessage.addListener(message => {
       upsertRequest(message.summary);
       render();
       break;
+    case "recorder-status-changed":
     case "transaction-started":
       updateTransaction(message.status);
       render();
@@ -104,34 +180,50 @@ function render() {
   title.textContent = transaction.name;
   document.title = `${transaction.name} · BreakTest`;
 
-  const sortedRequests = [...requests].sort((left, right) => (
+  const sortedRequests = requests.filter(request => showCached || !isCacheOnly(request)).sort((left, right) => (
     Date.parse(left.startedDateTime) - Date.parse(right.startedDateTime)
       || (left.ordinal ?? 0) - (right.ordinal ?? 0)
   ));
+  clearHover();
+  timeline.replaceChildren();
   requestRows.replaceChildren();
   document.querySelector("#timing-unknown-legend").hidden = !sortedRequests.some(request =>
     requestPhases(request).some(phase => phase.name === "unknown" && phase.time > 0));
   const completedCount = sortedRequests.length;
   const includedCount = transaction.requestCount ?? completedCount;
-  const pendingCount = Math.max(includedCount - completedCount, 0);
+  const pendingCount = transaction.pendingCount ?? Math.max(includedCount - requests.length, 0);
+  const cachedCount = requests.filter(isCacheOnly).length;
+  const hiddenCount = requests.length - completedCount;
+  cacheToggle.hidden = cachedCount === 0;
+  cacheToggle.textContent = showCached ? `Hide ${cachedCount} cached` : `${cachedCount} cached hidden · Show`;
+  cacheToggle.setAttribute("aria-pressed", String(showCached));
   summary.textContent = pendingCount
     ? `${completedCount} completed · ${pendingCount} pending`
     : `${completedCount} ${completedCount === 1 ? "request" : "requests"}`;
-  emptyState.textContent = "No completed requests in this transaction yet.";
+  const networkRequests = requests.filter(request => !isCacheOnly(request));
+  const knownSizes = networkRequests.filter(request => Number.isFinite(request.size) && request.size >= 0);
+  const bytes = knownSizes.reduce((total, request) => total + request.size, 0);
+  summary.textContent += ` · ${formatSize(bytes)} KB recorded${knownSizes.length < networkRequests.length ? " (partial)" : ""}`;
+  summary.title = "Recorded network response bytes; cached responses excluded. Some browsers do not report full transfer sizes.";
+  emptyState.textContent = hiddenCount ? "No completed network requests; cached responses are hidden." : "No completed requests in this transaction yet.";
   emptyState.hidden = completedCount > 0;
   if (!completedCount) {
     return;
   }
 
-  const firstStart = sortedRequests.reduce(
+  // Keep the origin stable when cached rows are shown or hidden.
+  const firstStart = requests.reduce(
     (earliest, request) => Math.min(earliest, requestStart(request)),
     Number.POSITIVE_INFINITY
   );
-  const lastEnd = sortedRequests.reduce(
+  const lastEnd = requests.reduce(
     (latest, request) => Math.max(latest, requestStart(request) + requestDuration(request)),
     0
   );
   const span = Math.max(lastEnd - firstStart, 1);
+  summary.textContent += ` · ${formatResponseTime(Math.max(lastEnd - firstStart, 0))} to last response`;
+  timelineSpan = span;
+  renderAxis(span);
   const rows = document.createDocumentFragment();
 
   for (const request of sortedRequests) {
@@ -152,8 +244,12 @@ function render() {
     url.className = "request-detail-url";
     const urlText = document.createElement("div");
     urlText.className = "request-detail-url-text";
-    urlText.textContent = request.url || "—";
+    urlText.textContent = shortUrl(request.url);
     urlText.title = request.url || "";
+
+    const relativeStart = document.createElement("td");
+    relativeStart.className = "request-detail-start";
+    relativeStart.textContent = formatResponseTime(Math.max(requestStart(request) - firstStart, 0));
 
     const responseTime = document.createElement("td");
     responseTime.className = "request-detail-time";
@@ -179,15 +275,37 @@ function render() {
     track.setAttribute("aria-hidden", "true");
     const waterfall = document.createElement("div");
     waterfall.className = "waterfall-cell";
-    waterfall.append(track, urlText);
-    url.append(waterfall);
+    waterfall.append(track);
+    waterfall.tabIndex = 0;
+    waterfall.setAttribute("aria-describedby", "request-timing-tooltip");
+    waterfall.setAttribute("aria-label", `${request.method} ${shortUrl(request.url)}; ${track.title}`);
+    waterfall.dataset.path = shortUrl(request.url);
+    waterfall.dataset.details = JSON.stringify([
+      ["Start offset", formatResponseTime(requestStart(request) - firstStart)],
+      ["End offset", formatResponseTime(requestStart(request) - firstStart + requestDuration(request))],
+      ["Duration", formatResponseTime(requestDuration(request))],
+      ...phases.map(phase => [phase.label, formatResponseTime(phase.time)])
+    ]);
+    waterfall.addEventListener("focus", () => showTimingDetails(waterfall));
+    waterfall.addEventListener("blur", clearHover);
+    track.removeAttribute("title");
+    const waterfallColumn = document.createElement("td");
+    waterfallColumn.className = "request-detail-waterfall";
+    waterfallColumn.append(waterfall);
+    url.append(urlText);
+    if (isCacheOnly(request)) {
+      const badge = document.createElement("span");
+      badge.className = "cache-badge";
+      badge.textContent = "cached";
+      urlText.append(" ", badge);
+    }
     const size = document.createElement("td");
     size.className = "request-detail-size";
     size.textContent = formatSize(request.size);
     size.title = Number.isFinite(request.size) && request.size >= 0
       ? `${request.size.toLocaleString()} recorded response bytes (1 KB = 1,000 bytes)`
       : "Response size unavailable";
-    row.append(status, method, url, size, responseTime);
+    row.append(status, method, url, waterfallColumn, relativeStart, responseTime, size);
     rows.append(row);
   }
   requestRows.append(rows);
@@ -198,6 +316,9 @@ function showUnavailable(message) {
   requests = [];
   title.textContent = "Transaction unavailable";
   summary.textContent = "";
+  cacheToggle.hidden = true;
+  clearHover();
+  timeline.replaceChildren();
   requestRows.replaceChildren();
   emptyState.textContent = message;
   emptyState.hidden = false;
@@ -232,7 +353,7 @@ function requestPhases(request) {
   if (!timings) return [{name: "unknown", label: "Total duration only; the browser did not provide a timing breakdown", time: total}];
   // HAR connect already includes TLS. Do not add ssl a second time.
   const phases = [
-    {name: "connection", label: "Connection / sending (including queue and DNS)", time: [timings.blocked, timings.dns, timings.connect, timings.send].reduce((sum, value) => sum + known(value), 0)},
+    {name: "connection", label: "Connection / sending", time: [timings.blocked, timings.dns, timings.connect, timings.send].reduce((sum, value) => sum + known(value), 0)},
     {name: "wait", label: request.timingSource === "response-events" ? "Before response (connection and waiting combined)" : "Waiting", time: known(timings.wait)},
     {name: "receive", label: "Receiving", time: known(timings.receive)}
   ];

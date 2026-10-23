@@ -17,7 +17,7 @@ const http = require('node:http');
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   let browser;
   try {
-    browser = await chromium.launch({channel: 'chromium', headless: true});
+    browser = await chromium.launch({channel: process.env.PLAYWRIGHT_CHANNEL || 'chromium', headless: true});
     for (const [kind, panel] of [['chrome','sidepanel'], ['firefox','sidebar']]) {
       const page = await browser.newPage({viewport: {width: 380, height: 850}});
       const errors = [];
@@ -25,13 +25,14 @@ const http = require('node:http');
       await page.addInitScript(kind => {
         window.sent = [];
         let status = {ok: true, active: false, transactions: []};
+        window.setRecorderStatus = value => { status = value; };
         const api = {
           extension: {inIncognitoContext: false},
           windows: {getCurrent: async () => ({id: 1, incognito: false})},
           tabs: {query: async () => [{id: 1, windowId: 1, url: 'https://example.test/already-loaded'}]},
           storage: {local: {get: async () => ({recordingDisclosureAcceptedVersion: 3}), set: async () => {}, remove: async () => {}}},
           runtime: {
-            connect: () => ({}), onMessage: {addListener() {}},
+            connect: () => ({onDisconnect: {addListener(fn) { window.disconnectRecorder = fn; }}}), onMessage: {addListener(fn) { window.receiveRecorderMessage = fn; }},
             sendMessage: async message => {
               window.sent.push(message);
               if (message.type === 'start-recording') {
@@ -79,6 +80,34 @@ const http = require('node:http');
       await page.screenshot({path: `/tmp/breaktest-${kind}-next-transaction.png`});
       await page.keyboard.press('Escape');
       assert.equal(await page.locator('#next-transaction-dialog').evaluate(dialog => dialog.open), false);
+      for (const pendingCount of [4, 0]) {
+        await page.evaluate(pendingCount => receiveRecorderMessage({type: 'recorder-status-changed', status: {active: true, pendingCount}}), pendingCount);
+        assert.equal(await page.locator('#pending-count').innerText(), String(pendingCount));
+      }
+      if (kind === 'firefox') {
+        await page.evaluate(() => {
+          setRecorderStatus({ok: true, active: true, attached: true, requestCount: 7,
+            pendingCount: 0, transactions: [], summaries: [],
+            currentTransaction: {id: 'recovered', name: '07_Recovered'}, recoveryNotice: 'Recording recovered after a background restart.'});
+          disconnectRecorder();
+        });
+        assert.equal(await page.locator('#next-transaction-button').isDisabled(), true);
+        await page.waitForFunction(() => document.querySelector('#transaction-name').value === '07_Recovered');
+        assert.equal(await page.locator('#next-transaction-button').isDisabled(), false);
+        await page.evaluate(() => receiveRecorderMessage({type: 'recorder-status-changed', status: {active: true, pendingCount: 0, requestCount: 7}}));
+        assert.equal(await page.locator('#pending-count').innerText(), '0');
+        await page.evaluate(() => {
+          const status = {ok: true, active: false, transactions: [], summaries: []};
+          setRecorderStatus(status);
+          receiveRecorderMessage({type: 'recording-cancelled', ...status});
+        });
+        assert.equal(await page.locator('#next-transaction-button').isDisabled(), true);
+        await page.evaluate(() => receiveRecorderMessage({type: 'recording-started', ok: true, active: true,
+          currentTransaction: {id: 'another', name: 'Another window'}, transactions: [], summaries: []}));
+        assert.equal(await page.locator('#next-transaction-button').isDisabled(), false);
+        await page.evaluate(() => receiveRecorderMessage({type: 'recording-stopped', active: false, transactions: [], summaries: []}));
+        assert.equal(await page.locator('#next-transaction-button').isDisabled(), true);
+      }
       assert.deepEqual(errors, []);
       console.log(`${kind}: start without navigation, popup, counter, cancel, retry and confirmation passed`);
       await page.close();

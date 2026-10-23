@@ -93,23 +93,19 @@ button.transaction-action:disabled { cursor: not-allowed; opacity: .35; }
 .request-detail-heading h1 { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; }
 .request-detail-heading p { margin-top: 2px; color: var(--muted); font-size: 11px; }
 .request-detail-heading .request-detail-eyebrow { margin: 0; color: var(--primary); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
-.request-detail-table-wrap { max-height: calc(100vh - 120px); overflow: auto; border-top: 1px solid var(--border); }
-.request-detail-table { width: 100%; min-width: 720px; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+.request-detail-table-wrap { max-height: calc(100vh - 195px); overflow: auto; border-top: 1px solid var(--border); }
+.request-detail-table { width: 100%; min-width: 920px; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
 .request-detail-table th { position: sticky; top: 0; z-index: 1; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--background); color: var(--muted); font-size: 10px; text-align: left; text-transform: uppercase; }
 .request-detail-table td { height: 28px; padding: 0 10px; border-bottom: 1px solid var(--border); overflow: hidden; vertical-align: middle; }
 .request-detail-table tr:last-child td { border-bottom: 0; }
 .request-detail-table tr.failed { background: var(--failure); }
-.request-detail-table th:nth-child(1), .request-detail-table td:nth-child(1) { width: 70px; }
-.request-detail-table th:nth-child(2), .request-detail-table td:nth-child(2) { width: 80px; }
-.request-detail-table th:nth-child(4), .request-detail-table td:nth-child(4) { width: 78px; text-align: right; }
-.request-detail-table th:nth-child(5), .request-detail-table td:nth-child(5) { width: 90px; text-align: right; }
 .request-detail-status, .request-detail-time { font-variant-numeric: tabular-nums; }
 .request-detail-status { color: var(--muted); font-weight: 700; }
 .request-detail-method { color: var(--muted); font-weight: 700; }
 .request-detail-table td.request-detail-url { padding-top: 0; padding-bottom: 0; }
 .waterfall-cell { position: relative; height: 28px; display: flex; align-items: center; isolation: isolate; }
-.request-detail-url-text { position: relative; z-index: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; padding: 0 6px; }
-.waterfall-track { position: absolute; inset: 0; overflow: hidden; background: repeating-linear-gradient(to right, color-mix(in srgb, var(--border) 40%, transparent) 0 1px, transparent 1px 25%); }
+.request-detail-url-text { position: relative; z-index: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; padding: 0; }
+.waterfall-track { position: absolute; inset: 0; overflow: hidden; background: repeating-linear-gradient(to right, color-mix(in srgb, var(--border) 40%, transparent) 0 1px, transparent 1px var(--grid-step, 25%)); }
 .waterfall-bar { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--phase-color) 30%, transparent); border-inline-start: 1px solid color-mix(in srgb, var(--phase-color) 45%, transparent); }
 .phase-connection { --phase-color: #9163dc; }
 .phase-wait { --phase-color: #d69b19; }
@@ -154,3 +150,28 @@ button.transaction-action:disabled { cursor: not-allowed; opacity: .35; }
 #next-transaction-error { color: var(--danger, #c62828); }
 
 .start-controls > button { flex: 1 1 0; min-width: 0; }
+
+/* Shared time coordinates for the ruler, request rows and pointer marker. */
+.request-detail-start { font-variant-numeric: tabular-nums; white-space: nowrap; }
+#waterfall-axis { position: relative; height: 22px; margin-top: 5px; overflow: hidden; text-transform: none; font-variant-numeric: tabular-nums; background: repeating-linear-gradient(to right, var(--border) 0 1px, transparent 1px var(--grid-step, 25%)); }
+.waterfall-tick { position: absolute; top: 3px; padding-left: 4px; white-space: nowrap; }
+.waterfall-hover-time { margin: 0; padding: 0 14px; min-height: 16px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.waterfall-hovering .waterfall-cell::after, .waterfall-hovering #waterfall-axis::after { content: ""; position: absolute; top: 0; bottom: 0; left: var(--hover-position); width: 1px; background: var(--primary); z-index: 2; pointer-events: none; }
+
+.request-detail-table th:nth-child(1) { width: 58px; }
+.request-detail-table th:nth-child(2) { width: 66px; }
+.request-detail-table th:nth-child(3) { width: 24%; }
+.request-detail-table th:nth-child(5) { width: 92px; }
+.request-detail-table th:nth-child(6) { width: 85px; }
+.request-detail-table th:nth-child(7) { width: 80px; }
+.request-detail-table th:nth-child(n+5), .request-detail-table td:nth-child(n+5) { text-align: right; }
+.request-detail-table tbody tr:hover, .request-detail-table tbody tr:focus-within { background: color-mix(in srgb, var(--primary) 9%, var(--surface)); }
+.request-detail-table tbody tr.failed:hover, .request-detail-table tbody tr.failed:focus-within { background: color-mix(in srgb, var(--primary) 9%, var(--failure)); }
+.waterfall-cell:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.cache-toggle { margin-top: 7px; padding: 3px 7px; font-size: 11px; background: var(--background); color: var(--primary); }
+.cache-badge { color: var(--muted); font-size: 10px; }
+.request-timing-tooltip { position: fixed; z-index: 10; width: 300px; max-width: calc(100vw - 16px); padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); box-shadow: 0 6px 24px rgb(0 0 0 / 18%); pointer-events: none; font-size: 11px; }
+.request-timing-tooltip strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 10px; font-size: 12px; }
+.request-timing-tooltip dl { display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; margin: 0; }
+.request-timing-tooltip dt { color: var(--muted); white-space: nowrap; }
+.request-timing-tooltip dd { margin: 0; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }

@@ -62,6 +62,7 @@ const nextTransactionName = document.querySelector("#next-transaction-name");
 const cancelTransactionRemoval = document.querySelector("#cancel-transaction-removal");
 
 let active = false;
+let recorderStateKnown = false;
 let busy = false;
 let errors = 0;
 let pendingExport = null;
@@ -73,7 +74,40 @@ const RECORDING_DISCLOSURE_VERSION = 3;
 const DEFAULT_TRANSACTION_NAME = "01_OpenHomepage";
 let recordingConsentAccepted = false;
 let inPrivateContext = false;
-const keepAlivePort = browser.runtime.connect({name: "recorder-ui"});
+let keepAlivePort;
+let reconnectTimer;
+let refreshingStatus = false;
+function connectRecorder() {
+  try {
+    keepAlivePort = browser.runtime.connect({name: "recorder-ui"});
+    keepAlivePort.onDisconnect.addListener(() => {
+      keepAlivePort = null;
+      recorderStateKnown = false;
+      setActive(false);
+      indicator.classList.remove("active");
+      setStatus("Recorder connection interrupted. Recovering recording state…");
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => { connectRecorder(); refreshRecorderStatus(); }, 500);
+    });
+  } catch {
+    reconnectTimer = setTimeout(() => { connectRecorder(); refreshRecorderStatus(); }, 1000);
+  }
+}
+async function refreshRecorderStatus() {
+  if (refreshingStatus || busy) return;
+  refreshingStatus = true;
+  try { await restoreStatus(); }
+  catch (error) {
+    recorderStateKnown = false;
+    setActive(false);
+    indicator.classList.remove("active");
+    showError(`Recorder unavailable: ${error.message}`);
+  } finally { refreshingStatus = false; }
+}
+window.addEventListener("focus", refreshRecorderStatus);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshRecorderStatus(); });
+setInterval(() => { if (!document.hidden) refreshRecorderStatus(); }, 5000);
+connectRecorder();
 
 startButton.addEventListener("click", () => startRecording(false));
 nextTransactionButton.addEventListener("click", openNextTransaction);
@@ -100,6 +134,24 @@ transactionName.addEventListener("keydown", event => {
 
 browser.runtime.onMessage.addListener(message => {
   switch (message.type) {
+    case "recorder-status-changed":
+      applyStatus(message.status);
+      break;
+    case "recording-started":
+      applyStatus(message);
+      renderRequestSummaries(message.summaries || []);
+      setStatus("Recording started.");
+      break;
+    case "recording-stopped":
+      pendingExport = message.export || pendingExport;
+      applyStatus(message);
+      if (pendingExport) setStatus("A completed HAR is waiting to be saved.");
+      break;
+    case "recording-cancelled":
+      applyStatus(message);
+      renderRequestSummaries([]);
+      setStatus("Recording discarded.");
+      break;
     case "request-finished":
       appendRequest(message.summary);
       applyStatus(message.status);
@@ -308,8 +360,7 @@ async function removeLaunchIfUnclaimed(nonce) {
 async function restoreStatus() {
   const response = await send({type: "recorder-status"});
   if (!response.ok) {
-    showError(response.error);
-    return;
+    throw new Error(response.error || "Unable to read recorder state");
   }
   applyStatus(response);
   if (!response.active) {
@@ -522,6 +573,7 @@ function waitForDownload(downloadId) {
 }
 
 function applyStatus(status) {
+  recorderStateKnown = !status.recoveryError;
   setActive(Boolean(status.active));
   currentTransactionId = status.currentTransaction?.id || null;
   indicator.classList.toggle("active", Boolean(status.active && status.attached !== false));
@@ -535,6 +587,8 @@ function applyStatus(status) {
   if (status.transactions) {
     renderTransactions(status.transactions);
   }
+  const notice = status.recoveryError || status.persistenceError || status.recoveryNotice;
+  if (notice) setStatus(notice);
 }
 
 function setActive(isActive) {
@@ -583,7 +637,7 @@ function requireRecordingConsent() {
 }
 
 function updateStartControls() {
-  const disabled = busy || active || Boolean(pendingExport) || !recordingConsentAccepted;
+  const disabled = !recorderStateKnown || busy || active || Boolean(pendingExport) || !recordingConsentAccepted;
   startButton.disabled = disabled;
 
   privateStartButton.disabled = disabled;
@@ -860,7 +914,9 @@ function setStatus(message) {
 
 async function send(message) {
   try {
-    return await browser.runtime.sendMessage(message);
+    const response = await browser.runtime.sendMessage(message);
+    if (!response?.ok && message.type !== "recorder-status") setTimeout(refreshRecorderStatus, 0);
+    return response || {ok: false, error: "The recorder did not respond"};
   } catch (error) {
     return {ok: false, error: error.message};
   }

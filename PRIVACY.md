@@ -46,9 +46,18 @@ secondary purpose.
 
 ## Storage and retention
 
-Active recording data is kept in extension memory until you finish or discard
-the recording, close the recorded tab, reload or remove the extension, or the
-browser terminates the extension process. The recorder retains at most 2 MiB
+Chrome active recording data is kept in extension memory. Firefox also saves
+recovery checkpoints while recording, including request/response bodies and
+captured files. Normal Firefox checkpoints use browser-local IndexedDB; private
+recording checkpoints use memory-only extension session storage. Session markers
+prevent resuming a recording against a reused tab ID after a browser restart.
+Checkpoints are removed after successful export staging or explicit discard.
+Abandoned normal checkpoints are removed when the background next starts without
+a matching session marker. Removing the extension removes its IndexedDB data.
+Private checkpoints disappear when the browser session ends and are subject to
+session-storage limits; a storage failure is reported in the recorder. After a
+background restart, completed requests are recovered and unfinished requests are
+marked interrupted. Traffic missed during the restart cannot be reconstructed. The recorder retains at most 2 MiB
 of body text for each response and marks larger bodies as truncated. File capture
 is limited to 20 MiB per file, 64 MiB total file bytes, and 1,000 file records per
 recording. Files are embedded as base64 in the HAR; incomplete or oversized

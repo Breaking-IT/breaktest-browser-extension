@@ -21,6 +21,7 @@
           <p class="request-detail-eyebrow">Transaction requests</p>
           <h1 id="transaction-details-title">Loading transaction…</h1>
           <p id="transaction-details-summary"></p>
+          <button id="cache-toggle" class="cache-toggle" type="button" aria-pressed="false" hidden></button>
         </div>
       </div>
       <div class="waterfall-legend" aria-label="Waterfall phases">
@@ -29,15 +30,18 @@
         <span><i class="phase-receive"></i>Receiving</span>
         <span id="timing-unknown-legend" title="The browser supplied a duration but no timing breakdown." hidden><i class="phase-unknown"></i>No timing breakdown</span>
       </div>
+      <p id="waterfall-hover-time" class="waterfall-hover-time">Hover over the waterfall to inspect elapsed time</p>
       <div class="request-detail-table-wrap">
         <table class="request-detail-table">
           <thead>
             <tr>
               <th scope="col">HTTP</th>
               <th scope="col">Method</th>
-              <th scope="col">URL &amp; waterfall</th>
+              <th scope="col">Request URL</th>
+              <th scope="col">Waterfall<div id="waterfall-axis" aria-label="Time since first request"></div></th>
+              <th scope="col" title="Time since first request">Start offset</th>
+              <th scope="col" title="Response time">Duration</th>
               <th scope="col" title="Recorded response size in kilobytes (1 KB = 1,000 bytes)">Size (KB)</th>
-              <th scope="col" title="Response time">Time</th>
             </tr>
           </thead>
           <tbody id="transaction-details-requests"></tbody>
@@ -46,6 +50,7 @@
       </div>
     </section>
   </main>
+  <div id="request-timing-tooltip" class="request-timing-tooltip" role="tooltip" hidden></div>
   <script type="module" src="transaction-details.js"></script>
 </body>
 </html>

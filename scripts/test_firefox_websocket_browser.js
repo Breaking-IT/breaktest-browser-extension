@@ -84,6 +84,11 @@ async function main() {
           while (!text.includes('line2')) text += decoder.decode((await reader.read()).value, {stream: true});
         }});
         if (initSse[0].error) throw new Error(initSse[0].error.message);
+        // HAR transaction boundaries and Firefox filter callbacks use millisecond
+        // timestamps. Do not place the next transaction in the very same clock
+        // tick as the first stream message when testing timestamp attribution.
+        const firstMessageBoundary = Date.now();
+        while (Date.now() <= firstMessageBoundary) await new Promise(resolve => setTimeout(resolve, 1));
         startTransaction('Second transaction');
         const nextSse = await browser.scripting.executeScript({target: {tabId: tab.id}, world: 'MAIN', func: async () => {
           testSocket.send('second transaction send');

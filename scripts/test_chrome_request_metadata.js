@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const listener = () => ({addListener() {}});
+const listener = () => ({listeners: [], addListener(fn) { this.listeners.push(fn); }});
 const context = {
   console,
   atob,
@@ -357,7 +357,181 @@ async function testRecordingLocator() {
   }
 }
 
+async function testCacheMetadata() {
+  for (const cache of ['memory', 'disk', 'service-worker']) {
+    resetRecording();
+    await vm.runInContext(`requestWillBeSent({tabId: 1}, {
+      requestId: "cached", timestamp: 1, wallTime: 1700000000, type: "Image",
+      request: {method: "GET", url: "https://example.test/icon.png", headers: {}}
+    })`, context);
+    await vm.runInContext(`handleDebuggerEvent({tabId: 1}, "Network.requestServedFromCache", {requestId: "cached"})`, context);
+    await vm.runInContext(`responseReceived({tabId: 1}, {
+      requestId: "cached", timestamp: 1.001, type: "Image",
+      response: {status: 200, headers: {}, fromDiskCache: ${cache === 'disk'}, fromServiceWorker: ${cache === 'service-worker'}}
+    })`, context);
+    vm.runInContext(`finalizeRequest(recording.activeRequests.get("root:cached"), 1.002)`, context);
+    assert.strictEqual(vm.runInContext('recording.entries[0]._fromCache', context), cache);
+    assert.strictEqual(vm.runInContext('recording.summaries[0].fromCache', context), cache);
+    assert.strictEqual(vm.runInContext('transactionDetails("t1").requests[0].fromCache', context), cache);
+  }
+}
+
+async function testDetachedRequests() {
+  resetRecording();
+  for (const sessionId of [undefined, "frame", "worker"]) {
+    context.testSource = {tabId: 1, ...(sessionId ? {sessionId} : {})};
+    await vm.runInContext(`requestWillBeSent(testSource, {
+      requestId: "pending", timestamp: 1, wallTime: 1700000000,
+      request: {method: "GET", url: "https://example.test/slow", headers: {}}
+    })`, context);
+  }
+  vm.runInContext('recording.targetParents = new Map([["frame", "root"], ["worker", "frame"]])', context);
+  assert.strictEqual(vm.runInContext('recorderStatus().pendingCount', context), 3);
+  await vm.runInContext('handleDebuggerEvent({tabId: 1}, "Target.detachedFromTarget", {sessionId: "frame"})', context);
+  assert.strictEqual(vm.runInContext('recorderStatus().pendingCount', context), 1);
+  assert.strictEqual(vm.runInContext('recording.entries.length', context), 2);
+  assert.strictEqual(vm.runInContext('recording.entries.every(entry => entry._breaktest.incomplete && entry._breaktest.failed)', context), true);
+  context.chrome.debugger.onDetach.listeners[0]({tabId: 1}, 'target_closed');
+  assert.strictEqual(vm.runInContext('recorderStatus().pendingCount', context), 0);
+  assert.strictEqual(vm.runInContext('recording.entries.length', context), 3);
+  // Late completion events must not duplicate interrupted entries.
+  await vm.runInContext('loadingFailed({tabId: 1}, {requestId: "pending", timestamp: 2})', context);
+  assert.strictEqual(vm.runInContext('recording.entries.length', context), 3);
+}
+
+async function testNetworkPendingBeforeBodyCapture() {
+  resetRecording();
+  const originalCommand = context.chrome.debugger.sendCommand;
+  const originalNotify = context.chrome.runtime.sendMessage;
+  const releases = [];
+  const statuses = [];
+  context.chrome.debugger.sendCommand = async (_source, method) => {
+    if (method === 'Network.getResponseBody') return new Promise(resolve => releases.push(resolve));
+    return {};
+  };
+  context.chrome.runtime.sendMessage = async message => {
+    if (message.type === 'recorder-status-changed') statuses.push(message.status.pendingCount);
+  };
+  try {
+    for (let id = 0; id < 4; id++) {
+      await vm.runInContext(`requestWillBeSent({tabId: 1}, {
+        requestId: "body-${id}", timestamp: 1, wallTime: 1700000000,
+        request: {method: "GET", url: "https://example.test/body-${id}", headers: {}}
+      })`, context);
+    }
+    assert.strictEqual(vm.runInContext('recorderStatus().pendingCount', context), 4);
+    const completions = [];
+    for (let id = 0; id < 4; id++) {
+      completions.push(vm.runInContext(`loadingFinished({tabId: 1}, {requestId: "body-${id}", timestamp: 2, encodedDataLength: 5})`, context));
+    }
+    assert.strictEqual(vm.runInContext('recorderStatus().pendingCount', context), 0);
+    assert.strictEqual(vm.runInContext('transactionDetails("t1").transaction.pendingCount', context), 0);
+    assert.strictEqual(statuses.at(-1), 0);
+    assert.strictEqual(vm.runInContext('recording.entries.length', context), 0, 'bodies have not finished processing');
+    for (const release of releases) release({body: 'saved', base64Encoded: false});
+    await Promise.all(completions);
+    assert.strictEqual(vm.runInContext('recording.entries.length', context), 4);
+    assert.strictEqual(vm.runInContext('recording.entries.every(entry => entry.response.content.text === "saved")', context), true);
+    // Failure must update the count before waiting for stream bookkeeping too.
+    await vm.runInContext(`requestWillBeSent({tabId: 1}, {
+      requestId: "failed", timestamp: 3, wallTime: 1700000002,
+      request: {method: "GET", url: "https://example.test/failed", headers: {}}
+    })`, context);
+    let releaseStream;
+    context.streamWait = new Promise(resolve => { releaseStream = resolve; });
+    vm.runInContext('recording.activeRequests.get("root:failed").sseStreamTask = streamWait', context);
+    const failure = vm.runInContext('loadingFailed({tabId: 1}, {requestId: "failed", timestamp: 4, errorText: "cancelled"})', context);
+    assert.strictEqual(vm.runInContext('recorderStatus().pendingCount', context), 0);
+    assert.strictEqual(statuses.at(-1), 0);
+    releaseStream();
+    await failure;
+    assert.strictEqual(vm.runInContext('recording.entries.at(-1)._breaktest.failed', context), true);
+  } finally {
+    context.chrome.debugger.sendCommand = originalCommand;
+    context.chrome.runtime.sendMessage = originalNotify;
+  }
+}
+
+async function testDocumentTargetHandoff() {
+  for (const failed of [false, true]) {
+    resetRecording();
+    const originalCommand = context.chrome.debugger.sendCommand;
+    let bodySource;
+    context.chrome.debugger.sendCommand = async (source, method) => {
+      if (method === 'Network.getResponseBody') { bodySource = source.sessionId; return {body: '<html>iframe</html>', base64Encoded: false}; }
+      return {};
+    };
+    try {
+      await vm.runInContext(`requestWillBeSent({tabId: 1}, {
+        requestId: "navigation", timestamp: 1, wallTime: 1700000000, type: "Document", frameId: "iframe",
+        request: {method: "GET", url: "https://consent.example.test/iframe", headers: {}}
+      })`, context);
+      await vm.runInContext(`responseReceived({tabId: 1}, {
+        requestId: "navigation", timestamp: 1.1, type: "Document", hasExtraInfo: true,
+        response: {status: 200, headers: {"content-type": "text/html"}}
+      })`, context);
+      assert.strictEqual(vm.runInContext('recorderStatus().pendingCount', context), 1);
+      const terminal = failed ? 'loadingFailed' : 'loadingFinished';
+      await vm.runInContext(`${terminal}({tabId: 1, sessionId: "child"}, {
+        requestId: "navigation", timestamp: 1.2, encodedDataLength: 20, errorText: "cancelled"
+      })`, context);
+      assert.strictEqual(vm.runInContext('recorderStatus().pendingCount', context), 0);
+      assert.strictEqual(vm.runInContext('recording.activeRequests.size', context), 0);
+      assert.strictEqual(vm.runInContext('recording.entries.length', context), 1);
+      if (!failed) assert.strictEqual(bodySource, 'child', 'body must be fetched from the new target');
+      assert.strictEqual(vm.runInContext('recording.entries[0]._breaktest.failed', context), failed);
+      assert.strictEqual(vm.runInContext('recording.requestChains.get("root:navigation") === recording.requestChains.get("child:navigation")', context), true);
+    } finally { context.chrome.debugger.sendCommand = originalCommand; }
+  }
+  resetRecording();
+  for (const sessionId of ['one', 'two']) {
+    await vm.runInContext(`requestWillBeSent({tabId: 1, sessionId: "${sessionId}"}, {
+      requestId: "shared", timestamp: 1, wallTime: 1700000000, type: "XHR",
+      request: {method: "GET", url: "https://example.test/request", headers: {}}
+    })`, context);
+  }
+  await vm.runInContext('loadingFinished({tabId: 1, sessionId: "other"}, {requestId: "shared", timestamp: 2})', context);
+  assert.strictEqual(vm.runInContext('recorderStatus().pendingCount', context), 2, 'non-document IDs must stay scoped to their sessions');
+}
+
+async function testFrameLifecycle() {
+  resetRecording();
+  for (const [id, frame, loader] of [['old','main','old-loader'], ['new','main','new-loader'], ['other','child','child-loader']]) {
+    await vm.runInContext(`requestWillBeSent({tabId: 1}, {
+      requestId: "${id}", timestamp: 1, wallTime: 1700000000, type: "Fetch",
+      frameId: "${frame}", loaderId: "${loader}",
+      request: {method: "GET", url: "https://example.test/${id}", headers: {}}
+    })`, context);
+  }
+  await vm.runInContext(`handleDebuggerEvent({tabId: 1}, "Page.frameNavigated", {
+    frame: {id: "main", loaderId: "new-loader"}
+  })`, context);
+  assert.strictEqual(vm.runInContext('recorderStatus().pendingCount', context), 2);
+  assert.strictEqual(vm.runInContext('recording.entries[0]._breaktest.incomplete', context), true);
+  await vm.runInContext(`handleDebuggerEvent({tabId: 1}, "Page.frameDetached", {frameId: "child", reason: "swap"})`, context);
+  assert.strictEqual(vm.runInContext('recorderStatus().pendingCount', context), 2);
+  await vm.runInContext(`handleDebuggerEvent({tabId: 1}, "Page.frameDetached", {frameId: "child", reason: "remove"})`, context);
+  assert.strictEqual(vm.runInContext('recorderStatus().pendingCount', context), 1);
+  assert.strictEqual(vm.runInContext('recording.entries.length', context), 2);
+  const original = context.chrome.debugger.sendCommand;
+  const calls = [];
+  context.chrome.debugger.sendCommand = async (_source, method) => {
+    calls.push(method);
+    if (method === 'Network.enable') throw new Error('target closed');
+    return {};
+  };
+  try {
+    await assert.rejects(vm.runInContext(`handleDebuggerEvent({tabId: 1}, "Target.attachedToTarget", {sessionId: "child"})`, context));
+    assert.ok(calls.includes('Runtime.runIfWaitingForDebugger'), 'always release paused targets on setup failure');
+  } finally { context.chrome.debugger.sendCommand = original; }
+}
+
 async function main() {
+  await testFrameLifecycle();
+  await testDocumentTargetHandoff();
+  await testNetworkPendingBeforeBodyCapture();
+  await testDetachedRequests();
+  await testCacheMetadata();
   await testRecordingLocator();
   await testNavigationFailureKeepsRecording();
   await testExtraInfoBeforeRequest();

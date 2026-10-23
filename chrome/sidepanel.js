@@ -99,6 +99,9 @@ transactionName.addEventListener("keydown", event => {
 
 chrome.runtime.onMessage.addListener(message => {
   switch (message.type) {
+    case "recorder-status-changed":
+      applyStatus(message.status);
+      break;
     case "request-finished":
       appendRequest(message.summary);
       applyStatus(message.status);

@@ -12,6 +12,14 @@ const CACHE_OVERRIDE_KEY = "firefoxCacheOverrideActive";
 const REQUEST_FILTER = {urls: ["http://*/*", "https://*/*", "ws://*/*", "wss://*/*"]};
 
 let recording = null;
+let recoveryError = null;
+let recordingRestored = false;
+let commandQueue = Promise.resolve();
+let checkpointWrites = Promise.resolve();
+let checkpointQueued = false;
+const recordingReady = restoreRecording().catch(error => {
+  recoveryError = `Recording recovery failed: ${errorMessage(error)}. The saved checkpoint has been retained.`;
+}).finally(() => { recordingRestored = true; });
 const RECORDING_LOCATOR_KEY = "recordingLocatorNormal";
 // Clear this background context's stale locator after an extension/browser restart.
 let locatorWrites = browser.storage.local.remove(RECORDING_LOCATOR_KEY).catch(() => {});
@@ -35,9 +43,28 @@ browser.runtime.onConnect.addListener(port => {
   port.onDisconnect.addListener(() => uiPorts.delete(port));
 });
 
-browser.runtime.onMessage.addListener((message, sender) => handleMessage(message, sender));
+browser.runtime.onMessage.addListener((message, sender) => {
+  const execute = async () => {
+    await recordingReady;
+    if (recoveryError && message.type !== "recorder-status") throw new Error(recoveryError);
+    const result = await handleMessage(message, sender);
+    if (!["recorder-status", "transaction-details", "focus-recording-tab"].includes(message.type)) {
+      try { await checkpointRecording(); }
+      catch (error) { reportCheckpointError(error); throw error; }
+    }
+    return result;
+  };
+  if (["start-recording", "new-transaction", "rename-transaction", "delete-transaction",
+    "stop-recording", "cancel-recording"].includes(message.type)) {
+    const result = commandQueue.catch(() => {}).then(execute);
+    commandQueue = result;
+    return result;
+  }
+  return execute();
+});
 
-browser.tabs.onRemoved.addListener(tabId => {
+browser.tabs.onRemoved.addListener(async tabId => {
+  await recordingReady;
   if (!recording || recording.tabId !== tabId || recording.stopping) {
     return;
   }
@@ -51,24 +78,24 @@ browser.tabs.onRemoved.addListener(tabId => {
 });
 
 browser.webRequest.onBeforeRequest.addListener(
-  beforeRequest,
+  recoveringListener(beforeRequest),
   REQUEST_FILTER,
   ["blocking", "requestBody"]
 );
 browser.webRequest.onBeforeSendHeaders.addListener(
-  beforeSendHeaders,
+  recoveringListener(beforeSendHeaders),
   REQUEST_FILTER,
   ["requestHeaders"]
 );
 browser.webRequest.onHeadersReceived.addListener(
-  headersReceived,
+  recoveringListener(headersReceived),
   REQUEST_FILTER,
   ["responseHeaders"]
 );
-browser.webRequest.onResponseStarted.addListener(responseStarted, REQUEST_FILTER);
-browser.webRequest.onBeforeRedirect.addListener(beforeRedirect, REQUEST_FILTER);
-browser.webRequest.onCompleted.addListener(completed, REQUEST_FILTER);
-browser.webRequest.onErrorOccurred.addListener(failed, REQUEST_FILTER);
+browser.webRequest.onResponseStarted.addListener(recoveringListener(responseStarted), REQUEST_FILTER);
+browser.webRequest.onBeforeRedirect.addListener(recoveringListener(beforeRedirect), REQUEST_FILTER);
+browser.webRequest.onCompleted.addListener(recoveringListener(completed), REQUEST_FILTER);
+browser.webRequest.onErrorOccurred.addListener(recoveringListener(failed), REQUEST_FILTER);
 
 async function handleMessage(message, sender = {}) {
   if (message?.type?.startsWith("websocket-")) {
@@ -102,6 +129,7 @@ async function handleMessage(message, sender = {}) {
 }
 
 async function startRecording(message) {
+  await recordingReady;
   await cacheRecovery;
   let {tabId} = message;
   const transactionName = String(message.transactionName || "").trim();
@@ -130,12 +158,13 @@ async function startRecording(message) {
     );
   }
   if (recording) {
-    await discardCurrentRecording();
+    throw new Error("A recording already exists. Finish or discard it before starting another.");
   }
 
   const disableCache = message.disableCache === true;
   const cacheOverrideApplied = await applyCacheOverride(disableCache);
   recording = {
+    recoveryId: crypto.randomUUID(),
     tabId,
     tabTitle: tab.title || "",
     incognito: Boolean(tab.incognito),
@@ -168,6 +197,7 @@ async function startRecording(message) {
   }
 
   setRecordingBadge(true);
+  await checkpointRecording();
   notify("recording-started", recorderStatus());
   return recorderStatus();
 }
@@ -329,9 +359,10 @@ function transactionDetails(id) {
       startedDateTime: entry.startedDateTime,
       time: entry.time,
       size: entry.response.bodySize,
+      fromCache: entry._fromCache,
       timings: entry._breaktest.timingsAvailable === false ? null : entry.timings
     }));
-  return {ok: true, transaction, requests};
+  return {ok: true, transaction: {...transaction, pendingCount: networkPendingCount(recording, id)}, requests};
 }
 
 async function stopRecording() {
@@ -358,7 +389,8 @@ async function stopRecording() {
   const exportDescriptor = await globalThis.HarExportStore.save(har);
   const status = recorderStatus();
   recording = null;
-  notify("recording-stopped", status);
+  await clearCheckpoint();
+  notify("recording-stopped", {...status, export: exportDescriptor});
   return {ok: true, export: exportDescriptor, status};
 }
 
@@ -381,6 +413,7 @@ async function discardCurrentRecording() {
   await releaseCacheOverride(owner);
   setRecordingBadge(false);
   recording = null;
+  await clearCheckpoint();
 }
 
 function beforeRequest(details) {
@@ -478,6 +511,7 @@ function attachResponseFilter(owner, state) {
         }
       } finally {
         filter.write(event.data);
+        checkpointRecording().catch(reportCheckpointError);
       }
     };
     filter.onstop = () => {
@@ -709,6 +743,7 @@ function finalizeRequest(owner, state, finishedAt) {
     status: state.response.status,
     resourceType: state.resourceType,
     size: state.response.bodySize,
+    fromCache: entry._fromCache,
     timings: entry._breaktest.timingsAvailable === false ? null : entry.timings,
     startedDateTime: state.startedDateTime,
     time: totalMs,
@@ -785,19 +820,32 @@ function buildHar(owner) {
   };
 }
 
+function networkPendingCount(owner, transactionId) {
+  return [...owner.activeRequests.values()].filter(state =>
+    !state.requestDone && !state.finalized && !state.discarded
+    && !(state.webSocket && state.response.status === 101)
+    && (!transactionId || state.transaction.id === transactionId)
+  ).length;
+}
+
 function recorderStatus() {
   if (!recording) {
-    return {ok: true, active: false, summaries: []};
+    return {ok: true, active: false, summaries: [], recoveryError};
   }
   return {
     ok: true,
     active: !recording.stopping,
+    recoveryError,
+    recoveryNotice: recording.recoveryNotice || null,
+    persistenceError: recording.persistenceError || null,
     attached: recording.attached,
     tabId: recording.tabId,
     currentTransaction: recording.currentTransaction,
-    transactions: recording.transactions,
+    transactions: recording.transactions.map(transaction => ({
+      ...transaction, pendingCount: networkPendingCount(recording, transaction.id)
+    })),
     requestCount: recording.entries.length,
-    pendingCount: recording.pendingStates.size,
+    pendingCount: networkPendingCount(recording),
     capturedBodyBytes: recording.capturedBodyBytes,
     incognito: recording.incognito,
     cacheDisabled: recording.disableCache,
@@ -1029,6 +1077,7 @@ function setRecordingBadge(active) {
 }
 
 async function focusRecordingTab() {
+  await recordingReady;
   await locatorWrites;
   const stored = await browser.storage.local.get(["recordingLocatorNormal", "recordingLocatorPrivate"]);
   let candidates = [stored.recordingLocatorNormal, stored.recordingLocatorPrivate]
@@ -1049,11 +1098,116 @@ async function focusRecordingTab() {
 }
 
 function notify(type, payload = {}) {
-  browser.runtime.sendMessage({type, ...payload}).catch(() => {
+  const deliver = () => browser.runtime.sendMessage({
+    type, ...payload,
+    // Checkpoint writes can delay delivery; never restore an older pending count.
+    ...(payload.status ? {status: recorderStatus()} : {})
+  }).catch(() => {
     // The sidebar may be closed; recording continues in the background page.
   });
+  if (type === "recorder-warning") { deliver(); return; }
+  // Announce captured data after committing it, or explicitly warn if saving fails.
+  checkpointRecording().then(deliver, error => { reportCheckpointError(error); deliver(); });
 }
 
 function errorMessage(error) {
   return error?.message || String(error || "Unexpected recorder error");
+}
+
+
+function recoveringListener(listener) {
+  const invoke = details => {
+    if (recoveryError) return {};
+    try { return listener(details); }
+    finally {
+      checkpointRecording().catch(reportCheckpointError);
+      // Network completion and body processing are separate events. Refresh the
+      // counter even when a response filter has not finished storing the body.
+      if (recording) browser.runtime.sendMessage({type: "recorder-status-changed", status: recorderStatus()}).catch(() => {});
+    }
+  };
+  return details => recordingRestored ? invoke(details) : recordingReady.then(() => invoke(details));
+}
+
+function reportCheckpointError(error) {
+  if (!recording) return;
+  recording.persistenceError = `Recording recovery is not up to date: ${errorMessage(error)}`;
+  notify("recorder-warning", {message: recording.persistenceError});
+}
+
+function recordingSnapshot(owner) {
+  const pending = [...owner.pendingStates].map(state => {
+    // Browser filter handles, callbacks, promises and parsers cannot be restored.
+    const {owner: ignoredOwner, filter, sseParser, webSocketDone, webSocketResolve,
+      earlyStreamChunks, ...data} = state;
+    return {...data, bodyChunks: state.bodyChunks.map(chunk => Array.from(chunk))};
+  });
+  return structuredClone({
+    version: 1, id: owner.recoveryId, tabId: owner.tabId, tabTitle: owner.tabTitle,
+    incognito: owner.incognito, disableCache: owner.disableCache, startedAt: owner.startedAt,
+    transactions: owner.transactions, currentTransaction: owner.currentTransaction,
+    nextTransactionOrdinal: owner.nextTransactionOrdinal, nextEntryOrdinal: owner.nextEntryOrdinal,
+    capturedBodyBytes: owner.capturedBodyBytes, entries: owner.entries, summaries: owner.summaries,
+    pending, uploadCapture: UploadStore.exportFiles(owner),
+    uploadReservedBytes: owner.uploadCapture?.reservedBytes || 0,
+    messageTransactionTimeline: owner.messageTransactionTimeline, savedAt: Date.now()
+  });
+}
+
+function checkpointRecording() {
+  if (!recording) return checkpointWrites;
+  // Coalesce bursts while a write is in flight, then snapshot the latest state.
+  if (!checkpointQueued) {
+    checkpointQueued = true;
+    checkpointWrites = checkpointWrites.catch(() => {}).then(async () => {
+      checkpointQueued = false;
+      if (!recording) return;
+      const owner = recording;
+      await RecordingStore.save(recordingSnapshot(owner));
+      if (recording === owner) owner.persistenceError = null;
+    });
+  }
+  return checkpointWrites;
+}
+
+async function clearCheckpoint() {
+  await checkpointWrites.catch(() => {});
+  await RecordingStore.remove();
+}
+
+async function restoreRecording() {
+  await Promise.resolve();
+  await cacheRecovery;
+  const saved = await RecordingStore.load();
+  if (!saved) return;
+  if (saved.version !== 1) throw new Error("Unsupported recording checkpoint version");
+  let tab;
+  try { tab = await browser.tabs.get(saved.tabId); } catch { /* Export remains possible. */ }
+  const attached = Boolean(tab && Boolean(tab.incognito) === saved.incognito);
+  const owner = recording = {
+    ...saved, recoveryId: saved.id, attached, stopping: false,
+    activeRequests: new Map(), pendingStates: new Set(),
+    recoveryNotice: attached
+      ? "Recording recovered after a background restart. New requests are being captured; requests in flight at the restart are marked interrupted."
+      : "Recording recovered, but its tab is closed. Captured requests can still be exported."
+  };
+  delete owner.pending;
+  if (saved.uploadCapture) {
+    owner.uploadCapture = {...saved.uploadCapture, token: crypto.randomUUID(), transfers: new Map(), reservedBytes: saved.uploadReservedBytes || 0};
+    for (const file of owner.uploadCapture.files) {
+      if (file.status === "pending") { file.status = "unavailable"; file.reason = "background-restarted"; }
+    }
+  }
+  for (const data of saved.pending || []) {
+    const state = {...data, owner, bodyChunks: data.bodyChunks.map(chunk => Uint8Array.from(chunk)),
+      finalized: false, incomplete: true, failed: true, bodyUnavailable: true,
+      failureText: "Capture interrupted by background restart", bodyUnavailableReason: "Background restarted"};
+    if (state.webSocket) state.webSocket.captureEnd = "background-restarted";
+    if (state.sse) state.sse.captureEnd = "background-restarted";
+    completeBody(state);
+    finalizeRequest(owner, state, state.finishedAt || state.responseStartedAt || state.startedAt);
+  }
+  owner.cacheOverrideApplied = attached ? await applyCacheOverride(owner.disableCache) : false;
+  setRecordingBadge(attached);
+  await checkpointRecording();
 }

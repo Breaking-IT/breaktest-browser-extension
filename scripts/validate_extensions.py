@@ -253,7 +253,7 @@ def validate() -> list[str]:
         errors.append("chrome: a manifest-level side panel would make the recorder global")
 
     firefox_background_scripts = manifests["firefox"].get("background", {}).get("scripts", [])
-    if firefox_background_scripts != ["har-export-store.js", "upload-store.js", "message-capture.js", "sse-capture.js", "websocket-store.js", "background.js"]:
+    if firefox_background_scripts != ["har-export-store.js", "recording-store.js", "upload-store.js", "message-capture.js", "sse-capture.js", "websocket-store.js", "background.js"]:
         errors.append("firefox: IndexedDB HAR export support must load before the recorder background")
 
     if not (ROOT / "PRIVACY.md").is_file():
@@ -303,6 +303,12 @@ def validate() -> list[str]:
     )
     if stream_test.returncode:
         errors.append(f"Stream message tests failed:\n{stream_test.stderr or stream_test.stdout}")
+    recovery_test = subprocess.run(
+        ["node", str(ROOT / "scripts" / "test_firefox_recording_recovery.js")],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    if recovery_test.returncode:
+        errors.append(f"Firefox recording recovery tests failed:\n{recovery_test.stderr or recovery_test.stdout}")
     for filename in ("upload-store.js", "upload-capture.js", "message-capture.js", "sse-capture.js"):
         if (ROOT / "chrome" / filename).read_bytes() != (ROOT / "firefox" / filename).read_bytes():
             errors.append(f"Upload capture sources differ between browsers: {filename}")

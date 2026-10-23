@@ -79,14 +79,8 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     return;
   }
   const interruptedRecording = recording;
-  for (const [key, state] of recording.activeRequests) {
-    if (state.webSocket) {
-      state.webSocket.captureEnd = "debugger-detached";
-      state.incomplete = !state.finalized;
-      finalizeRequest(state, state.responseTimestamp ?? state.lastTimestamp);
-      recording.activeRequests.delete(key);
-    }
-  }
+  finishDetachedRequests(recording, () => true, "debugger-detached");
+  recording.targetParents?.clear();
   recording.attached = false;
   recording.detachReason = reason;
   setRecordingBadge(false);
@@ -99,6 +93,28 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   const task = reconnectDebugger(interruptedRecording, reason);
   trackTask(task);
 });
+
+// Detached targets cannot deliver terminal network events. Preserve their
+// unfinished requests as interrupted evidence instead of leaving them pending.
+function finishDetachedRequests(owner, matches, reason) {
+  const states = [...owner.activeRequests.values()].filter(matches);
+  for (const state of states) {
+    if (owner.activeRequests.get(state.key) === state) owner.activeRequests.delete(state.key);
+  }
+  for (const state of states) {
+    if (state.webSocket) state.webSocket.captureEnd = reason;
+    state.sseParser?.finish();
+    if (state.sse) state.sse.captureEnd = reason;
+    if (state.finalized) continue;
+    state.incomplete = true;
+    state.failed = true;
+    state.failureText = `Capture interrupted: ${reason}`;
+    state.bodyUnavailable = true;
+    state.bodyUnavailableReason = state.failureText;
+    resolveUnknownExtraInfo(state);
+    finalizeRequest(state, state.responseTimestamp ?? state.lastTimestamp ?? state.requestTimestamp);
+  }
+}
 
 async function handleMessage(message, sender = {}) {
   if (message?.type?.startsWith("upload-")) {
@@ -294,7 +310,7 @@ async function configureRootTarget(tabId) {
   await enableTarget({tabId});
   await safeCommand({tabId}, "Target.setAutoAttach", {
     autoAttach: true,
-    waitForDebuggerOnStart: false,
+    waitForDebuggerOnStart: true,
     flatten: true,
     filter: [
       {type: "iframe", exclude: false},
@@ -344,6 +360,7 @@ function delay(milliseconds) {
 }
 
 async function enableTarget(target) {
+  await safeCommand(target, "Page.enable", {});
   await chrome.debugger.sendCommand(target, "Network.enable", {
     maxTotalBufferSize: NETWORK_TOTAL_BUFFER_BYTES,
     maxResourceBufferSize: NETWORK_RESOURCE_BUFFER_BYTES,
@@ -528,10 +545,11 @@ function transactionDetails(id) {
       startedDateTime: entry.startedDateTime,
       time: entry.time,
       size: entry.response.bodySize,
+      fromCache: entry._fromCache,
       timingSource: entry._breaktest.timingSource,
       timings: entry._breaktest.timingsAvailable === false ? null : entry.timings
     }));
-  return {ok: true, transaction, requests};
+  return {ok: true, transaction: {...transaction, pendingCount: networkPendingCount(id)}, requests};
 }
 
 async function stopRecording() {
@@ -634,15 +652,52 @@ async function handleDebuggerEvent(source, method, params) {
       await webSocketExecutionContext(recording, source, params.context);
       break;
     case "Target.attachedToTarget": {
+      recording.targetParents ??= new Map();
+      recording.targetParents.set(params.sessionId, source.sessionId || "root");
       const child = {tabId: source.tabId, sessionId: params.sessionId};
-      await enableTarget(child);
-      await safeCommand(child, "Target.setAutoAttach", {
-        autoAttach: true,
-        waitForDebuggerOnStart: false,
-        flatten: true
-      });
+      // Install capture before a newly attached iframe/worker can finish loading.
+      try {
+        await enableTarget(child);
+        await safeCommand(child, "Target.setAutoAttach", {
+          autoAttach: true,
+          waitForDebuggerOnStart: true,
+          flatten: true
+        });
+      } finally {
+        await safeCommand(child, "Runtime.runIfWaitingForDebugger", {});
+      }
       break;
     }
+    case "Target.detachedFromTarget": {
+      const detached = new Set([params.sessionId]);
+      // Descendants lose their transport along with the parent target.
+      let previousSize;
+      do {
+        previousSize = detached.size;
+        for (const [child, parent] of recording.targetParents || []) {
+          if (detached.has(parent)) detached.add(child);
+        }
+      } while (detached.size !== previousSize);
+      finishDetachedRequests(recording, state => detached.has(state.source.sessionId), "target-detached");
+      for (const sessionId of detached) recording.targetParents?.delete(sessionId);
+      break;
+    }
+    case "Page.frameNavigated": {
+      const frame = params.frame;
+      if (frame?.id && frame.loaderId) {
+        finishDetachedRequests(recording, state => !state.networkDone
+          && state.frameId === frame.id && state.loaderId
+          && state.loaderId !== frame.loaderId, "frame-navigated");
+      }
+      break;
+    }
+    case "Page.frameDetached":
+      // A process swap hands the frame to another target; only removal ends it.
+      if (params.reason === "remove") {
+        finishDetachedRequests(recording, state => !state.networkDone
+          && state.frameId === params.frameId, "frame-removed");
+      }
+      break;
     case "Network.requestWillBeSent":
       await requestWillBeSent(source, params);
       break;
@@ -655,6 +710,11 @@ async function handleDebuggerEvent(source, method, params) {
     case "Network.dataReceived":
       sseDataReceived(source, params);
       break;
+    case "Network.requestServedFromCache": {
+      const state = recording.activeRequests.get(requestKey(source, params.requestId));
+      if (state) state.fromMemoryCache = true;
+      break;
+    }
     case "Network.responseReceived":
       await responseReceived(source, params);
       break;
@@ -797,7 +857,8 @@ async function webSocketEvent(source, method, params) {
 
 async function requestWillBeSent(source, params) {
   const key = requestKey(source, params.requestId);
-  const previous = recording.activeRequests.get(key);
+  const previous = params.redirectResponse
+    ? requestStateForEvent(source, params) : recording.activeRequests.get(key);
   if (params.redirectResponse && previous) {
     applyResponse(previous, params.redirectResponse, params.timestamp);
     if (typeof params.redirectHasExtraInfo === "boolean") {
@@ -835,6 +896,8 @@ async function requestWillBeSent(source, params) {
     lastTimestamp: params.timestamp,
     startedDateTime: new Date(wallTimeMs).toISOString(),
     resourceType: params.type || "Other",
+    frameId: params.frameId,
+    loaderId: params.loaderId,
     initiator: params.initiator || {},
     transaction: {...transaction},
     request: {
@@ -867,6 +930,7 @@ async function requestWillBeSent(source, params) {
     state.request.postData = postData;
   }
   recording.activeRequests.set(key, state);
+  notify("recorder-status-changed", {status: recorderStatus()});
 
   if (request.hasPostData && typeof request.postData !== "string") {
     state.postDataTask = chrome.debugger.sendCommand(source, "Network.getRequestPostData", {
@@ -985,7 +1049,7 @@ function requestExtraInfo(source, params) {
 }
 
 async function responseReceived(source, params) {
-  const state = recording.activeRequests.get(requestKey(source, params.requestId));
+  const state = requestStateForEvent(source, params);
   if (!state) {
     return;
   }
@@ -1059,11 +1123,14 @@ function responseExtraInfo(source, params) {
 }
 
 async function loadingFinished(source, params) {
+  const owner = recording;
   const key = requestKey(source, params.requestId);
-  const state = recording.activeRequests.get(key);
+  const state = requestStateForEvent(source, params);
   if (!state || state.webSocket) {
     return;
   }
+  state.networkDone = true;
+  notify("recorder-status-changed", {status: recorderStatus()});
   if (state.sseStreamTask) await state.sseStreamTask;
   state.sseParser?.finish();
   if (state.sse) state.sse.captureEnd = "stream-ended";
@@ -1083,8 +1150,9 @@ async function loadingFinished(source, params) {
       state.bodyUnavailableReason = errorMessage(error);
     }
   }
+  if (recording !== owner || state.finalized) return;
   finalizeRequest(state, params.timestamp);
-  recording.activeRequests.delete(key);
+  if (owner.activeRequests.get(key) === state) owner.activeRequests.delete(key);
 }
 
 async function getResponseBodyWithRetry(source, requestId) {
@@ -1103,11 +1171,14 @@ async function getResponseBodyWithRetry(source, requestId) {
 }
 
 async function loadingFailed(source, params) {
+  const owner = recording;
   const key = requestKey(source, params.requestId);
-  const state = recording.activeRequests.get(key);
+  const state = requestStateForEvent(source, params);
   if (!state) {
     return;
   }
+  state.networkDone = true;
+  notify("recorder-status-changed", {status: recorderStatus()});
   if (state.sseStreamTask) await state.sseStreamTask;
   state.sseParser?.finish();
   if (state.sse) state.sse.captureEnd = "request-failed";
@@ -1116,8 +1187,9 @@ async function loadingFailed(source, params) {
   state.canceled = Boolean(params.canceled);
   state.lastTimestamp = params.timestamp;
   resolveUnknownExtraInfo(state);
+  if (recording !== owner || state.finalized) return;
   finalizeRequest(state, params.timestamp);
-  recording.activeRequests.delete(key);
+  if (owner.activeRequests.get(key) === state) owner.activeRequests.delete(key);
 }
 
 function applyResponse(state, response, timestamp) {
@@ -1198,7 +1270,7 @@ function finalizeRequest(state, finishedTimestamp) {
     serverIPAddress: state.serverIPAddress || "",
     connection: state.connection || "",
     _resourceType: state.resourceType,
-    _fromCache: state.fromDiskCache ? "disk" : (state.fromServiceWorker ? "service-worker" : undefined),
+    _fromCache: state.fromServiceWorker ? "service-worker" : state.fromDiskCache ? "disk" : state.fromMemoryCache ? "memory" : undefined,
     _breaktest: {
       transactionId: state.transaction.id,
       transactionName: state.transaction.name,
@@ -1239,6 +1311,7 @@ function finalizeRequest(state, finishedTimestamp) {
     status: state.response.status,
     resourceType: state.resourceType,
     size: state.response.bodySize,
+    fromCache: entry._fromCache,
     timingSource: entry._breaktest.timingSource,
     timings: entry._breaktest.timingsAvailable === false ? null : entry.timings,
     startedDateTime: state.startedDateTime,
@@ -1422,8 +1495,46 @@ function makePostData(text, headers) {
   return postData;
 }
 
+// A cross-origin document can start in the parent target and finish in an
+// out-of-process iframe target. Chrome keeps its request ID across that handoff.
+function requestStateForEvent(source, params) {
+  const key = requestKey(source, params.requestId);
+  const exact = recording.activeRequests.get(key);
+  if (exact) return exact;
+  const candidates = [...recording.activeRequests.values()].filter(state =>
+    state.requestId === params.requestId && state.resourceType === "Document"
+    && !state.finalized && !state.discarded
+    && (!params.frameId || !state.frameId || params.frameId === state.frameId)
+  );
+  // Never guess across unrelated targets if the ID is ambiguous.
+  if (candidates.length !== 1) return null;
+  const state = candidates[0];
+  const destinationChain = recording.requestChains.get(key);
+  if (destinationChain && destinationChain !== state.chain) {
+    if (destinationChain.attempts.length) return null;
+    state.chain.requestInfos.push(...destinationChain.requestInfos);
+    state.chain.responseInfos.push(...destinationChain.responseInfos);
+  }
+  recording.activeRequests.delete(state.key);
+  state.key = key;
+  state.source = {...source};
+  recording.activeRequests.set(key, state);
+  // Keep the original chain alias for late extra-info events from the parent.
+  recording.requestChains.set(key, state.chain);
+  recording.requestSequences.set(key, Math.max(recording.requestSequences.get(key) || 0, state.chain.attempts.length));
+  reconcileExtraInfo(state.chain);
+  return state;
+}
+
 function requestKey(source, requestId) {
   return `${source.sessionId || "root"}:${requestId}`;
+}
+
+function networkPendingCount(transactionId) {
+  return [...recording.activeRequests.values()].filter(state =>
+    !state.networkDone && !state.finalized && !state.discarded
+    && (!transactionId || state.transaction.id === transactionId)
+  ).length;
 }
 
 function recorderStatus() {
@@ -1439,9 +1550,11 @@ function recorderStatus() {
     startWarning: recording.startWarning || null,
     tabId: recording.tabId,
     currentTransaction: recording.currentTransaction,
-    transactions: recording.transactions,
+    transactions: recording.transactions.map(transaction => ({
+      ...transaction, pendingCount: networkPendingCount(transaction.id)
+    })),
     requestCount: recording.entries.length,
-    pendingCount: [...recording.activeRequests.values()].filter(state => !state.finalized).length,
+    pendingCount: networkPendingCount(),
     capturedBodyChars: recording.capturedBodyChars,
     incognito: recording.incognito,
     cacheDisabled: recording.disableCache,
