@@ -40,6 +40,7 @@ const nextTransactionError = document.querySelector("#next-transaction-error");
 const confirmNextTransaction = document.querySelector("#confirm-next-transaction");
 const cancelNextTransaction = document.querySelector("#cancel-next-transaction");
 const incognitoStartButton = document.querySelector("#incognito-start-button");
+const pauseButton = document.querySelector("#pause-button");
 const stopButton = document.querySelector("#stop-button");
 const discardButton = document.querySelector("#discard-button");
 const transactionHint = document.querySelector("#transaction-hint");
@@ -62,6 +63,7 @@ const nextTransactionName = document.querySelector("#next-transaction-name");
 const cancelTransactionRemoval = document.querySelector("#cancel-transaction-removal");
 
 let active = false;
+let paused = false;
 let busy = false;
 let errors = 0;
 let pendingExport = null;
@@ -69,7 +71,7 @@ let currentTransactionId = null;
 const INCOGNITO_LAUNCH_KEY = "pendingIncognitoLaunch";
 const INCOGNITO_LAUNCH_TTL_MS = 60_000;
 const RECORDING_CONSENT_KEY = "recordingDisclosureAcceptedVersion";
-const RECORDING_DISCLOSURE_VERSION = 3;
+const RECORDING_DISCLOSURE_VERSION = 4;
 const DEFAULT_TRANSACTION_NAME = "01_OpenHomepage";
 let recordingConsentAccepted = false;
 const inIncognitoContext = chrome.extension.inIncognitoContext;
@@ -83,6 +85,7 @@ incognitoStartButton.addEventListener("click", startIncognitoRecording);
 recordingConsent.addEventListener("change", persistRecordingConsent);
 privacySettingsButton.addEventListener("click", showPrivacySettings);
 privacyDoneButton.addEventListener("click", collapsePrivacySettings);
+pauseButton.addEventListener("click", toggleRecordingPaused);
 stopButton.addEventListener("click", finishRecording);
 discardButton.addEventListener("click", discardAndStartOver);
 clearViewButton.addEventListener("click", () => {
@@ -371,11 +374,25 @@ async function startNextTransaction(event) {
   }
 }
 
+async function toggleRecordingPaused() {
+  setBusy(true);
+  try {
+    const response = await send({type: paused ? "resume-recording" : "pause-recording"});
+    if (!response?.ok) throw new Error(response?.error || "Unable to change recording state");
+    applyStatus(response);
+    setStatus(paused ? "Recording paused. Requests already in progress will finish." : "Recording resumed.");
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function finishRecording() {
   setBusy(true);
   setStatus(pendingExport
     ? "Choose where to save the completed HAR…"
-    : "Finishing pending requests and building HAR…");
+    : "Building HAR from captured requests…");
   try {
     if (!pendingExport) {
       const response = await send({type: "stop-recording"});
@@ -488,10 +505,13 @@ function waitForDownload(downloadId) {
 }
 
 function applyStatus(status) {
+  paused = Boolean(status.active && status.paused);
   setActive(Boolean(status.active));
   currentTransactionId = status.currentTransaction?.id || null;
-  indicator.classList.toggle("active", Boolean(status.active && status.attached !== false));
+  indicator.classList.toggle("active", Boolean(status.active && !paused && status.attached !== false));
   indicator.classList.toggle("reconnecting", Boolean(status.reconnecting));
+  indicator.classList.toggle("paused", paused);
+  indicator.setAttribute("aria-label", paused ? "Recording paused" : "Recording status");
   requestCount.textContent = String(status.requestCount ?? 0);
   pendingCount.textContent = String(status.pendingCount ?? 0);
   if (status.currentTransaction) {
@@ -524,6 +544,11 @@ function setBusy(isBusy) {
 }
 
 function updateRecordingControls() {
+  pauseButton.hidden = !active;
+  pauseButton.disabled = !active || busy;
+  pauseButton.dataset.paused = String(paused);
+  pauseButton.title = paused ? "Resume recording" : "Pause recording";
+  pauseButton.setAttribute("aria-label", pauseButton.title);
   nextTransactionButton.disabled = !active || busy;
   confirmNextTransaction.disabled = busy;
   cancelNextTransaction.disabled = busy;
@@ -533,7 +558,7 @@ function updateRecordingControls() {
   stopButton.textContent = hasUnsavedHar ? "Save HAR" : "Finish and export";
   stopButton.hidden = !hasRecording && !hasUnsavedHar;
   stopButton.disabled = busy || (!hasRecording && !hasUnsavedHar);
-  discardButton.textContent = hasUnsavedHar ? "Discard and start over" : "Cancel recording";
+  discardButton.textContent = hasUnsavedHar ? "Discard and start over" : "Cancel";
   discardButton.hidden = !hasRecording && !hasUnsavedHar;
   discardButton.disabled = busy || (!hasRecording && !hasUnsavedHar);
 }

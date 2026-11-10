@@ -52,9 +52,9 @@ messages. No playback semantics are implied.
 - `_originalLength`: original payload string length before truncation (UTF-16
   code units for text, base64 characters otherwise).
 
-Capture is limited to 2 Mi characters per message, 16 Mi characters per
-connection, and 10,000 messages per connection. Base64 truncation preserves
-four-character boundaries; text truncation preserves surrogate pairs.
+Capture has no fixed per-message size, per-connection size, or message-count
+cap. Truncation fields remain documented for older recordings. Browser API
+failures and available memory can still prevent complete capture.
 
 ## Lifecycle and completeness
 
@@ -76,7 +76,7 @@ four-character boundaries; text truncation preserves surrogate pairs.
   the page lifecycle hook observes the close.
 - `captureEnd`: `socket-closed`, `recording-stopped`, or `debugger-detached`.
 - `messagesTruncated`: true if any payload was shortened or messages were dropped.
-- `droppedMessages`: number of messages omitted after a capture limit was reached.
+- `droppedMessages`: number of omitted messages (including limits in older recordings).
 - `error`: browser-reported WebSocket error, when present.
 
 An open socket at recording stop is not a failed handshake. Consumers must check

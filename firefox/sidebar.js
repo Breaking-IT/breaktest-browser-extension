@@ -6,8 +6,6 @@
  * See the LICENSE file at the root of this distribution.
  */
 
-import "./har-export-store.js";
-
 const focusRecordingButton = document.querySelector("#focus-recording-tab");
 focusRecordingButton.addEventListener("click", async () => {
   focusRecordingButton.disabled = true;
@@ -40,6 +38,7 @@ const nextTransactionError = document.querySelector("#next-transaction-error");
 const confirmNextTransaction = document.querySelector("#confirm-next-transaction");
 const cancelNextTransaction = document.querySelector("#cancel-next-transaction");
 const privateStartButton = document.querySelector("#private-start-button");
+const pauseButton = document.querySelector("#pause-button");
 const stopButton = document.querySelector("#stop-button");
 const discardButton = document.querySelector("#discard-button");
 const transactionHint = document.querySelector("#transaction-hint");
@@ -62,6 +61,7 @@ const nextTransactionName = document.querySelector("#next-transaction-name");
 const cancelTransactionRemoval = document.querySelector("#cancel-transaction-removal");
 
 let active = false;
+let paused = false;
 let recorderStateKnown = false;
 let busy = false;
 let errors = 0;
@@ -70,7 +70,7 @@ let currentTransactionId = null;
 const PRIVATE_LAUNCH_KEY = "pendingPrivateLaunch";
 const PRIVATE_LAUNCH_TTL_MS = 60_000;
 const RECORDING_CONSENT_KEY = "recordingDisclosureAcceptedVersion";
-const RECORDING_DISCLOSURE_VERSION = 3;
+const RECORDING_DISCLOSURE_VERSION = 4;
 const DEFAULT_TRANSACTION_NAME = "01_OpenHomepage";
 let recordingConsentAccepted = false;
 let inPrivateContext = false;
@@ -118,6 +118,7 @@ privateStartButton.addEventListener("click", startPrivateRecording);
 recordingConsent.addEventListener("change", persistRecordingConsent);
 privacySettingsButton.addEventListener("click", showPrivacySettings);
 privacyDoneButton.addEventListener("click", collapsePrivacySettings);
+pauseButton.addEventListener("click", toggleRecordingPaused);
 stopButton.addEventListener("click", finishRecording);
 discardButton.addEventListener("click", discardAndStartOver);
 clearViewButton.addEventListener("click", () => {
@@ -217,11 +218,12 @@ async function prefillStartUrl() {
 
 async function restorePendingExport() {
   try {
-    await globalThis.HarExportStore.cleanupStale();
     if (active) {
       return;
     }
-    pendingExport = await globalThis.HarExportStore.latest();
+    const response = await send({type: "har-export-latest"});
+    if (!response.ok) throw new Error(response.error);
+    pendingExport = response.export;
     if (!pendingExport) {
       return;
     }
@@ -456,11 +458,25 @@ async function startNextTransaction(event) {
   }
 }
 
+async function toggleRecordingPaused() {
+  setBusy(true);
+  try {
+    const response = await send({type: paused ? "resume-recording" : "pause-recording"});
+    if (!response?.ok) throw new Error(response?.error || "Unable to change recording state");
+    applyStatus(response);
+    setStatus(paused ? "Recording paused. Requests already in progress will finish." : "Recording resumed.");
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function finishRecording() {
   setBusy(true);
   setStatus(pendingExport
     ? "Choose where to save the completed HAR…"
-    : "Finishing pending requests and building HAR…");
+    : "Building HAR from captured requests…");
   try {
     if (!pendingExport) {
       const response = await send({type: "stop-recording"});
@@ -471,7 +487,6 @@ async function finishRecording() {
       applyStatus({active: false, requestCount: pendingExport.entryCount, pendingCount: 0});
     }
     await downloadHar(pendingExport);
-    await globalThis.HarExportStore.remove(pendingExport.id);
     pendingExport = null;
     updateRecordingControls();
     setStatus("HAR saved. Import it with File → Import HAR… in BreakTest.");
@@ -502,7 +517,8 @@ async function discardAndStartOver() {
       }
     }
     if (pendingExport) {
-      await globalThis.HarExportStore.remove(pendingExport.id);
+      const response = await send({type: "har-export-remove", id: pendingExport.id});
+      if (!response.ok) throw new Error(response.error);
     }
     pendingExport = null;
     resetRecordingView();
@@ -525,59 +541,19 @@ function resetRecordingView() {
 }
 
 async function downloadHar(exportDescriptor) {
-  const storedExport = await globalThis.HarExportStore.get(exportDescriptor.id);
-  if (!storedExport?.blob) {
-    throw new Error("The completed HAR is no longer available in local storage");
-  }
-  const url = URL.createObjectURL(storedExport.blob);
-  try {
-    const downloadId = await browser.downloads.download({
-      url,
-      filename: storedExport.filename,
-      saveAs: true
-    });
-    await waitForDownload(downloadId);
-  } finally {
-    URL.revokeObjectURL(url);
-  }
-}
-
-function waitForDownload(downloadId) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = error => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      browser.downloads.onChanged.removeListener(onChanged);
-      error ? reject(error) : resolve();
-    };
-    const inspect = item => {
-      if (item?.state === "complete") {
-        finish();
-      } else if (item?.state === "interrupted") {
-        finish(new Error(item.error || "The download was interrupted"));
-      }
-    };
-    const onChanged = delta => {
-      if (delta.id === downloadId && delta.state) {
-        inspect({state: delta.state.current, error: delta.error?.current});
-      }
-    };
-    browser.downloads.onChanged.addListener(onChanged);
-    browser.downloads.search({id: downloadId})
-      .then(items => inspect(items[0]))
-      .catch(finish);
-  });
+  const response = await send({type: "har-export-download", id: exportDescriptor.id, incognito: inPrivateContext});
+  if (!response.ok) throw new Error(response.error);
 }
 
 function applyStatus(status) {
+  paused = Boolean(status.active && status.paused);
   recorderStateKnown = !status.recoveryError;
   setActive(Boolean(status.active));
   currentTransactionId = status.currentTransaction?.id || null;
-  indicator.classList.toggle("active", Boolean(status.active && status.attached !== false));
+  indicator.classList.toggle("active", Boolean(status.active && !paused && status.attached !== false));
   indicator.classList.toggle("reconnecting", Boolean(status.reconnecting));
+  indicator.classList.toggle("paused", paused);
+  indicator.setAttribute("aria-label", paused ? "Recording paused" : "Recording status");
   requestCount.textContent = String(status.requestCount ?? 0);
   pendingCount.textContent = String(status.pendingCount ?? 0);
   if (status.currentTransaction) {
@@ -612,6 +588,11 @@ function setBusy(isBusy) {
 }
 
 function updateRecordingControls() {
+  pauseButton.hidden = !active;
+  pauseButton.disabled = !active || busy;
+  pauseButton.dataset.paused = String(paused);
+  pauseButton.title = paused ? "Resume recording" : "Pause recording";
+  pauseButton.setAttribute("aria-label", pauseButton.title);
   nextTransactionButton.disabled = !active || busy;
   confirmNextTransaction.disabled = busy;
   cancelNextTransaction.disabled = busy;
@@ -621,7 +602,7 @@ function updateRecordingControls() {
   stopButton.textContent = hasUnsavedHar ? "Save HAR" : "Finish and export";
   stopButton.hidden = !hasRecording && !hasUnsavedHar;
   stopButton.disabled = busy || (!hasRecording && !hasUnsavedHar);
-  discardButton.textContent = hasUnsavedHar ? "Discard and start over" : "Cancel recording";
+  discardButton.textContent = hasUnsavedHar ? "Discard and start over" : "Cancel";
   discardButton.hidden = !hasRecording && !hasUnsavedHar;
   discardButton.disabled = busy || (!hasRecording && !hasUnsavedHar);
 }

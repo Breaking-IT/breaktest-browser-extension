@@ -15,6 +15,7 @@ globalThis.MessageCapture = (() => {
     return null;
   }
   function tag(owner, message) {
+    if (owner.paused) return false;
     const id = transactionAt(owner, message.time);
     if (!id) return false;
     message._breaktest = {transactionId: id};

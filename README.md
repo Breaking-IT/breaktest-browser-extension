@@ -51,7 +51,7 @@ updates its message IDs. Deleting its requests also removes its messages; deleti
 the opening request removes the entire connection.
 
 See [the WebSocket HAR format](docs/websocket-har.md) for message fields,
-encoding, capture limits, and lifecycle metadata.
+encoding and lifecycle metadata.
 
 ## Server-sent events (SSE)
 
@@ -61,7 +61,7 @@ Chrome, Edge, and Firefox capture incoming SSE messages from `EventSource` and
 and per-message transaction ID. Named events, multiline data, and split UTF-8
 chunks are supported. BreakTest playback is separate from this recorder change.
 
-See [the SSE HAR format](docs/sse-har.md) for capture limits and timestamp precision.
+See [the SSE HAR format](docs/sse-har.md) for completeness and timestamp precision.
 
 ## Development
 

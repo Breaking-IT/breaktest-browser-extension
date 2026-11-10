@@ -13,9 +13,6 @@
   const nativeConstruct = page.Reflect.construct;
   const nativeApply = page.Reflect.apply;
   const nativeString = page.String;
-  const MAX_CHARS = 16 * 1024 * 1024;
-  const MAX_MESSAGE_CHARS = 2 * 1024 * 1024;
-  const MAX_MESSAGES = 10000;
   const now = () => (performance.timeOrigin + performance.now()) / 1000;
 
   function enqueue(record, type, fields) {
@@ -28,20 +25,14 @@
   }
   function payload(record, type, value) {
     if (record.ended) return;
-    if (record.count >= MAX_MESSAGES || record.chars >= MAX_CHARS) {
-      record.dropped++;
-      return;
-    }
     const time = now();
     const binary = typeof value !== "string";
     if (binary) value = XPCNativeWrapper(value);
-    const available = Math.min(MAX_MESSAGE_CHARS, MAX_CHARS - record.chars);
     let originalLength;
     let data;
     if (!binary) {
       originalLength = value.length;
-      data = value.slice(0, available);
-      if (data.length < value.length && /[\uD800-\uDBFF]$/.test(data)) data = data.slice(0, -1);
+      data = value;
     } else {
       const blob = value instanceof window.Blob;
       const bytes = blob ? null : ArrayBuffer.isView(value)
@@ -49,15 +40,14 @@
         : new Uint8Array(value);
       const size = blob ? value.size : bytes.byteLength;
       originalLength = Math.ceil(size / 3) * 4;
-      const byteLimit = Math.floor(available / 4) * 3;
       // Snapshot mutable buffers synchronously, before the caller can reuse them.
-      if (blob) data = value.slice(0, byteLimit);
+      if (blob) data = value.slice();
       else {
-        data = new Uint8Array(Math.min(size, byteLimit));
+        data = new Uint8Array(size);
         for (let index = 0; index < data.length; index++) data[index] = bytes[index];
       }
     }
-    const capturedLength = binary ? Math.min(originalLength, Math.floor(available / 4) * 4) : data.length;
+    const capturedLength = originalLength;
     record.chars += capturedLength;
     record.count++;
     record.chain = record.chain.then(async () => {
@@ -81,8 +71,7 @@
       }
       const result = await browser.runtime.sendMessage({
         type: "websocket-message", token: auth.token, key: auth.key,
-        message: {type, time, opcode: binary ? 2 : 1, data: text,
-          ...(capturedLength < originalLength ? {_truncated: true, _originalLength: originalLength} : {})}
+        message: {type, time, opcode: binary ? 2 : 1, data: text}
       });
       if (!result?.ok) record.ended = true;
     }).catch(async error => {

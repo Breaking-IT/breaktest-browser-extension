@@ -201,15 +201,14 @@ does not reload extension source files.
 
 ## Capture behavior and limits
 
-- Captures HTTP/HTTPS requests, response metadata, request bodies, and bounded
+- Captures HTTP/HTTPS requests, response metadata, request bodies, and full
   response bodies from the selected tab and attached frame/worker targets.
 - Ignores browser- and extension-internal requests such as injected password
   manager assets.
-- Captures at most 2 MiB of body text per response. There is no recording-wide
-  body limit. Oversized individual bodies are marked as truncated in
-  `_breaktest` metadata.
-- Requests use Chrome's durable response-body buffer when supported, with a
-  compatibility fallback and short retries around `Network.getResponseBody`.
+- No fixed per-response or recording-wide body cap. Responses stream into the
+  recorder as they arrive, avoiding dependence on CDP's finite response cache.
+  Browsers/resources without streaming use the durable response-body buffer
+  and short retries around `Network.getResponseBody` as a fallback.
   Redirect bodies are requested immediately before Chrome reuses their request
   identifier for the next hop.
   Bodies Chrome still cannot expose are marked as unavailable in `_breaktest`
@@ -250,10 +249,9 @@ Each record contains `fileName`, `mimeType`, `size` (original byte count),
 including binary files and empty files. An unavailable record has a `reason`
 and no `content`. The original network request body is not rewritten.
 
-Capture is limited to 20 MiB per file, 64 MiB total original file bytes per
-recording, and 1,000 file records. The HAR reports size-limit failures,
-interrupted reads/transfers, and the file-count limit explicitly. Export waits
-up to five seconds for transfers already accepted by the recorder. Navigation
+File capture has no fixed per-file size, total size, or file-count cap. The HAR
+reports interrupted reads/transfers explicitly. Export gives accepted transfers up to two seconds to finish; unfinished transfers
+are marked unavailable. Navigation
 can interrupt a transfer. Same-file observations may appear more than once if
 the browser supplies different File objects; filenames are not unique IDs.
 
@@ -286,4 +284,16 @@ badge, which now appears only when the recorded tab is selected.
 WebSocket messages include `_breaktest.transactionId` for the transaction active
 at capture time. SSE responses also include incoming messages and receive times
 in `_serverSentEvents`, covering native `EventSource` and `fetch` streams. See
-[the SSE HAR format](../docs/sse-har.md) for fields, limits, and capture diagnostics.
+[the SSE HAR format](../docs/sse-har.md) for fields and capture diagnostics.
+
+## Pause and resume
+
+Select **Pause recording** to skip new requests, file captures, and WebSocket/SSE
+messages without losing recorded data. Requests and file transfers already in
+progress finish capturing. Select **Resume recording** to continue in the same
+transaction. Traffic skipped while paused is not added later. You can still
+change transactions, finish and export, or cancel while paused.
+
+Finishing exports the data already captured even when requests remain pending.
+Unfinished requests are marked incomplete. Capture cleanup has a short deadline;
+unfinished file captures are marked unavailable rather than blocking export.

@@ -6,8 +6,7 @@
  * See the LICENSE file at the root of this distribution.
  */
 
-const MAX_BODY_BYTES = 2 * 1024 * 1024;
-const MAX_VISIBLE_REQUESTS = 1000;
+const MAX_VISIBLE_REQUESTS = 1000; // Live sidebar only; all captured entries remain in the HAR.
 const CACHE_OVERRIDE_KEY = "firefoxCacheOverrideActive";
 const REQUEST_FILTER = {urls: ["http://*/*", "https://*/*", "ws://*/*", "wss://*/*"]};
 
@@ -44,24 +43,47 @@ browser.runtime.onConnect.addListener(port => {
 });
 
 browser.runtime.onMessage.addListener((message, sender) => {
+  // Private sidebars cannot open IndexedDB. Keep the Blob and all storage
+  // operations in this spanning background, and send only small descriptors.
+  // Pending exports must remain accessible even if recording recovery failed.
+  if (message?.type?.startsWith("har-export-")) return handleHarExportMessage(message, sender);
   const execute = async () => {
     await recordingReady;
     if (recoveryError && message.type !== "recorder-status") throw new Error(recoveryError);
     const result = await handleMessage(message, sender);
     if (!["recorder-status", "transaction-details", "focus-recording-tab"].includes(message.type)) {
       try { await checkpointRecording(); }
-      catch (error) { reportCheckpointError(error); throw error; }
+      catch (error) { reportCheckpointError(error); }
     }
     return result;
   };
   if (["start-recording", "new-transaction", "rename-transaction", "delete-transaction",
-    "stop-recording", "cancel-recording"].includes(message.type)) {
+    "stop-recording", "cancel-recording", "pause-recording", "resume-recording"].includes(message.type)) {
     const result = commandQueue.catch(() => {}).then(execute);
     commandQueue = result;
     return result;
   }
   return execute();
 });
+
+async function handleHarExportMessage(message, sender) {
+  if (sender?.url?.split(/[?#]/)[0] !== browser.runtime.getURL("sidebar.html")) {
+    throw new Error("HAR exports can only be managed from the recorder sidebar");
+  }
+  switch (message.type) {
+    case "har-export-latest":
+      await globalThis.HarExportStore.cleanupStale().catch(error => console.error(error));
+      return {ok: true, export: await globalThis.HarExportStore.latest()};
+    case "har-export-download":
+      await globalThis.HarExportStore.download(message.id, {incognito: message.incognito === true});
+      return {ok: true};
+    case "har-export-remove":
+      await globalThis.HarExportStore.remove(message.id);
+      return {ok: true};
+    default:
+      throw new Error("Unknown HAR export command");
+  }
+}
 
 browser.tabs.onRemoved.addListener(async tabId => {
   await recordingReady;
@@ -115,6 +137,10 @@ async function handleMessage(message, sender = {}) {
       return deleteTransaction(message.id, message.requestDisposition);
     case "transaction-details":
       return transactionDetails(message.id);
+    case "pause-recording":
+      return setRecordingPaused(true);
+    case "resume-recording":
+      return setRecordingPaused(false);
     case "stop-recording":
       return stopRecording();
     case "cancel-recording":
@@ -197,7 +223,7 @@ async function startRecording(message) {
   }
 
   setRecordingBadge(true);
-  await checkpointRecording();
+  await checkpointRecording().catch(reportCheckpointError);
   notify("recording-started", recorderStatus());
   return recorderStatus();
 }
@@ -365,13 +391,24 @@ function transactionDetails(id) {
   return {ok: true, transaction: {...transaction, pendingCount: networkPendingCount(recording, id)}, requests};
 }
 
+function setRecordingPaused(paused) {
+  if (!recording || recording.stopping) throw new Error("No active recording");
+  recording.paused = paused;
+  setRecordingBadge(recording.attached !== false);
+  const status = recorderStatus();
+  notify("recorder-status-changed", {status});
+  return status;
+}
+
 async function stopRecording() {
   if (!recording) {
     throw new Error("No recording is active");
   }
   recording.stopping = true;
-  await globalThis.WebSocketStore.settle(browser, recording);
-  await globalThis.UploadStore.settle(recording);
+  await Promise.all([
+    globalThis.WebSocketStore.settle(browser, recording),
+    globalThis.UploadStore.settle(recording, 2000, 2000)
+  ]);
   const owner = recording;
   for (const state of [...owner.pendingStates]) {
     state.incomplete = !state.requestDone;
@@ -430,6 +467,8 @@ function beforeRequest(details) {
     finalizeRequest(owner, previous, details.timeStamp);
     owner.activeRequests.delete(details.requestId);
   }
+
+  if (owner.paused) return {};
 
   const transaction = owner.currentTransaction;
   const state = {
@@ -498,14 +537,8 @@ function attachResponseFilter(owner, state) {
             const time = Date.now() / 1000;
             if (state.sseParser) state.sseParser.feed(event.data, time);
             else if (state.earlyStreamChunks) {
-              const available = MAX_BODY_BYTES - (state.earlyStreamBytes || 0);
-              const bytes = new Uint8Array(event.data);
-              if (available > 0) {
-                const captured = bytes.slice(0, available);
-                state.earlyStreamChunks.push({bytes: captured, time});
-                state.earlyStreamBytes = (state.earlyStreamBytes || 0) + captured.length;
-              }
-              if (bytes.length > available) state.earlyStreamTruncated = true;
+              const captured = new Uint8Array(event.data).slice();
+              state.earlyStreamChunks.push({bytes: captured, time});
             }
           }
         }
@@ -549,18 +582,10 @@ function attachResponseFilter(owner, state) {
 function captureBodyChunk(state, buffer) {
   const bytes = new Uint8Array(buffer);
   state.receivedBodyBytes += bytes.byteLength;
-  const available = MAX_BODY_BYTES - state.capturedBodyBytes;
-  if (available <= 0) {
-    state.bodyTruncated = true;
-    return;
-  }
-  const captured = bytes.slice(0, Math.min(available, bytes.byteLength));
+  const captured = bytes.slice();
   state.bodyChunks.push(captured);
   state.capturedBodyBytes += captured.byteLength;
   state.owner.capturedBodyBytes += captured.byteLength;
-  if (captured.byteLength < bytes.byteLength) {
-    state.bodyTruncated = true;
-  }
 }
 
 function beforeSendHeaders(details) {
@@ -835,6 +860,7 @@ function recorderStatus() {
   return {
     ok: true,
     active: !recording.stopping,
+    paused: Boolean(recording.paused),
     recoveryError,
     recoveryNotice: recording.recoveryNotice || null,
     persistenceError: recording.persistenceError || null,
@@ -1067,8 +1093,8 @@ function setRecordingBadge(active) {
   // A global badge follows every tab, so explicitly use a tab-specific badge.
   browser.action.setBadgeText({text: ""}).catch(() => {});
   if (Number.isInteger(owner?.tabId)) {
-    browser.action.setBadgeText({tabId: owner.tabId, text: active ? "REC" : ""}).catch(() => {});
-    if (active) browser.action.setBadgeBackgroundColor({tabId: owner.tabId, color: "#c62828"}).catch(() => {});
+    browser.action.setBadgeText({tabId: owner.tabId, text: active ? (owner.paused ? "Ⅱ" : "REC") : ""}).catch(() => {});
+    if (active) browser.action.setBadgeBackgroundColor({tabId: owner.tabId, color: owner.paused ? "#b7791f" : "#c62828"}).catch(() => {});
   }
   locatorWrites = locatorWrites.catch(() => {}).then(() => active && owner
     ? browser.storage.local.set({[RECORDING_LOCATOR_KEY]: {tabId: owner.tabId, startedAt: owner.startedAt}})
@@ -1144,6 +1170,7 @@ function recordingSnapshot(owner) {
   });
   return structuredClone({
     version: 1, id: owner.recoveryId, tabId: owner.tabId, tabTitle: owner.tabTitle,
+    paused: Boolean(owner.paused),
     incognito: owner.incognito, disableCache: owner.disableCache, startedAt: owner.startedAt,
     transactions: owner.transactions, currentTransaction: owner.currentTransaction,
     nextTransactionOrdinal: owner.nextTransactionOrdinal, nextEntryOrdinal: owner.nextEntryOrdinal,
@@ -1188,7 +1215,7 @@ async function restoreRecording() {
     ...saved, recoveryId: saved.id, attached, stopping: false,
     activeRequests: new Map(), pendingStates: new Set(),
     recoveryNotice: attached
-      ? "Recording recovered after a background restart. New requests are being captured; requests in flight at the restart are marked interrupted."
+      ? saved.paused ? "Paused recording recovered after a background restart." : "Recording recovered after a background restart. New requests are being captured; requests in flight at the restart are marked interrupted."
       : "Recording recovered, but its tab is closed. Captured requests can still be exported."
   };
   delete owner.pending;

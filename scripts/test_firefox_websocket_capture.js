@@ -81,11 +81,11 @@ async function main() {
   const limited = {request: {url}, transaction: {id: 't1'}, startedAt: 1010};
   store.handshake(limitOwner, limited, sender);
   const limitAuth = store.handle(limitOwner, {type: 'websocket-begin', id: 'limit', url, time: 1010}, sender);
-  const big = {type: 'websocket-message', message: {...frame.message, data: 'a'.repeat(2 * 1024 * 1024)}};
+  const big = {type: 'websocket-message', message: {...frame.message, data: 'a'.repeat(2 * 1024 * 1024 + 1)}};
   for (let i = 0; i < 8; i++) store.handle(limitOwner, {...limitAuth, ...big}, sender);
   store.handle(limitOwner, {...limitAuth, ...frame}, sender);
-  assert.equal(limited.webSocketMessages.length, 8);
-  assert.equal(limited.webSocket.droppedMessages, 1);
+  assert.equal(limited.webSocketMessages.length, 9);
+  assert.equal(limited.webSocket.droppedMessages, 0);
 
   let drained = false;
   const settling = store.settle({scripting: {executeScript: async () => []}}, limitOwner).then(() => { drained = true; });

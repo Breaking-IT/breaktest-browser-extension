@@ -27,8 +27,7 @@ recording and export flow.
 Optional file-capture check: on a trusted test page containing a file input,
 select a small non-sensitive file during recording. Its bytes are base64 in
 `log._breaktest.uploadCapture.files` after export, even if not submitted. This
-is a custom HAR extension, not a guaranteed request-to-file mapping. Files over
-20 MiB or beyond the 64 MiB recording limit are marked unavailable. No upload
+is a custom HAR extension, not a guaranteed request-to-file mapping. File capture has no fixed size or count cap; interrupted transfers are marked unavailable. No upload
 section is exported when no files were captured.
 
 No account, remote service, license key, payment, or test credentials are

@@ -33,6 +33,13 @@ const assert = require('node:assert/strict');
         await recordingReady;
         const stage = (await browser.storage.session.get('testStage')).testStage;
         if (!stage) {
+          // Exercise the real Firefox storage APIs above the session quota.
+          await RecordingStore.save({id: 'large-private-test', incognito: true,
+            entries: [{body: 'x'.repeat(12 * 1024 * 1024)}]});
+          const marker = (await browser.storage.session.get('firefoxRecordingCheckpoint')).firefoxRecordingCheckpoint;
+          if (JSON.stringify(marker).length > 1024 || marker.snapshot) throw new Error('Recording payload leaked into session storage');
+          if ((await RecordingStore.load()).entries[0].body.length !== 12 * 1024 * 1024) throw new Error('Large private checkpoint lost data');
+          await RecordingStore.remove();
           let tab;
           for (let i = 0; i < 100 && !tab; i++) {
             tab = (await browser.tabs.query({})).find(t => t.url === ${JSON.stringify(url)} && t.status === 'complete');

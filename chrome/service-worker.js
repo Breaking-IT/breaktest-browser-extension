@@ -13,15 +13,13 @@ importScripts("sse-capture.js");
 importScripts("websocket-lifecycle.js");
 
 const PROTOCOL_VERSION = "1.3";
-const MAX_BODY_CHARS = 2 * 1024 * 1024;
+// CDP fallback cache sizes; streamed recordings are not capped by these buffers.
 const NETWORK_TOTAL_BUFFER_BYTES = 48 * 1024 * 1024;
 const NETWORK_RESOURCE_BUFFER_BYTES = 24 * 1024 * 1024;
-const MAX_VISIBLE_REQUESTS = 1000;
-const MAX_WEBSOCKET_MESSAGES = 10000;
-const MAX_WEBSOCKET_CHARS = 16 * 1024 * 1024;
+const MAX_VISIBLE_REQUESTS = 1000; // Live sidebar only; all captured entries remain in the HAR.
 const SIDE_PANEL_PATH = "sidepanel.html";
 const INCOGNITO_LAUNCH_KEY = "pendingIncognitoLaunch";
-const RECORDING_DISCLOSURE_VERSION = 3;
+const RECORDING_DISCLOSURE_VERSION = 4;
 
 let recording = null;
 const RECORDING_LOCATOR_KEY = chrome.extension.inIncognitoContext ? "recordingLocatorPrivate" : "recordingLocatorNormal";
@@ -133,6 +131,10 @@ async function handleMessage(message, sender = {}) {
       return deleteTransaction(message.id, message.requestDisposition);
     case "transaction-details":
       return transactionDetails(message.id);
+    case "pause-recording":
+      return setRecordingPaused(true);
+    case "resume-recording":
+      return setRecordingPaused(false);
     case "stop-recording":
       return stopRecording();
     case "cancel-recording":
@@ -364,7 +366,7 @@ async function enableTarget(target) {
   await chrome.debugger.sendCommand(target, "Network.enable", {
     maxTotalBufferSize: NETWORK_TOTAL_BUFFER_BYTES,
     maxResourceBufferSize: NETWORK_RESOURCE_BUFFER_BYTES,
-    maxPostDataSize: MAX_BODY_CHARS
+    maxPostDataSize: 0
   });
   await safeCommand(target, "Network.configureDurableMessages", {
     maxTotalBufferSize: NETWORK_TOTAL_BUFFER_BYTES,
@@ -552,17 +554,43 @@ function transactionDetails(id) {
   return {ok: true, transaction: {...transaction, pendingCount: networkPendingCount(id)}, requests};
 }
 
+function setRecordingPaused(paused) {
+  if (!recording || recording.stopping) throw new Error("No active recording");
+  recording.paused = paused;
+  setRecordingBadge(recording.attached !== false);
+  const status = recorderStatus();
+  notify("recorder-status-changed", {status});
+  return status;
+}
+
 async function stopRecording() {
   if (!recording) {
     throw new Error("No recording is active");
   }
-  recording.stopping = true;
-  await disableWebSocketLifecycle(recording);
-  await globalThis.UploadStore.settle(recording);
-  await settlePendingTasks();
+  const owner = recording;
+  owner.stopping = true;
+  // Browser commands can remain unresolved for long-lived or stalled requests.
+  // Give already-running capture work a short grace period, then export it.
+  await waitForCaptureCleanup(Promise.allSettled([
+    disableWebSocketLifecycle(owner),
+    globalThis.UploadStore.settle(owner, 2000, 2000),
+    settlePendingTasks(owner)
+  ]), 2000);
 
-  for (const state of recording.activeRequests.values()) {
-    state.incomplete = !state.finalized;
+  // Redirect attempts can be waiting for a body without being active anymore.
+  const unfinished = new Set([
+    ...owner.activeRequests.values(),
+    ...[...owner.requestChains.values()].flatMap(chain => chain.attempts)
+  ]);
+  for (const state of unfinished) {
+    if (state.finalized || state.discarded) continue;
+    state.incomplete = true;
+    if (!state.webSocket && state.response.content.text === undefined) {
+      state.bodyUnavailable = true;
+      state.bodyUnavailableReason = "Recording finished before response capture completed";
+      if (state.bodyStreaming) state.bodyTruncated = true;
+    }
+    if (state.sse) state.sse.captureIncomplete = true;
     state.sseParser?.finish();
     resolveUnknownExtraInfo(state);
     finalizeRequest(state, state.lastTimestamp || state.requestTimestamp);
@@ -571,7 +599,7 @@ async function stopRecording() {
 
   if (recording.attached) {
     try {
-      await chrome.debugger.detach({tabId: recording.tabId});
+      await waitForCaptureCleanup(chrome.debugger.detach({tabId: owner.tabId}), 1000);
     } catch (_ignored) {
       // The tab or debugger session may already have gone away.
     }
@@ -611,9 +639,21 @@ async function discardCurrentRecording() {
   recording = null;
 }
 
-async function settlePendingTasks() {
+async function waitForCaptureCleanup(task, timeoutMs) {
+  let timer;
+  try {
+    await Promise.race([
+      task,
+      new Promise(resolve => { timer = setTimeout(resolve, timeoutMs); })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function settlePendingTasks(owner) {
   for (let pass = 0; pass < 4; pass++) {
-    const tasks = [...recording.pendingTasks];
+    const tasks = [...owner.pendingTasks];
     if (tasks.length === 0) {
       return;
     }
@@ -627,7 +667,7 @@ function trackTask(task) {
   }
   const owner = recording;
   owner.pendingTasks.add(task);
-  task.finally(() => owner.pendingTasks.delete(task));
+  task.then(() => owner.pendingTasks.delete(task), () => owner.pendingTasks.delete(task));
 }
 
 async function handleDebuggerEvent(source, method, params) {
@@ -708,7 +748,7 @@ async function handleDebuggerEvent(source, method, params) {
       eventSourceMessageReceived(source, params);
       break;
     case "Network.dataReceived":
-      sseDataReceived(source, params);
+      responseDataReceived(source, params);
       break;
     case "Network.requestServedFromCache": {
       const state = recording.activeRequests.get(requestKey(source, params.requestId));
@@ -801,43 +841,26 @@ async function webSocketEvent(source, method, params) {
       return;
     }
     // The first close frame starts the closing handshake; the reply must not
-    // overwrite its direction. Observe this even after payload limits are hit.
+    // overwrite its direction.
     if (frame.opcode === 8 && state.webSocket.closeInitiatorSource !== "first-close-frame") {
       delete state.webSocket.closeInitiatorInferred;
       state.webSocket.closeInitiator = method === "Network.webSocketFrameSent" ? "client" : "server";
       state.webSocket.closeInitiatorSource = "first-close-frame";
       state.webSocket.closeInitiatedTime = state.webSocketWallTime + params.timestamp - state.requestTimestamp;
     }
-    if (state.webSocketMessages.length >= MAX_WEBSOCKET_MESSAGES
-        || state.webSocketChars >= MAX_WEBSOCKET_CHARS) {
-      state.webSocket.messagesTruncated = true;
-      state.webSocket.droppedMessages++;
-      return;
-    }
     const binary = frame.opcode !== 1;
-    let available = Math.min(MAX_BODY_CHARS, MAX_WEBSOCKET_CHARS - state.webSocketChars);
-    if (binary) {
-      available -= available % 4;
-    }
-    let data = frame.payloadData.slice(0, available);
-    // Do not split a UTF-16 surrogate pair when limiting a text payload.
-    if (!binary && data.length < frame.payloadData.length && /[\uD800-\uDBFF]$/.test(data)) {
-      data = data.slice(0, -1);
-    }
-    const truncated = data.length < frame.payloadData.length;
-    state.webSocket.messagesTruncated ||= truncated;
+    const data = frame.payloadData;
     state.webSocketChars += data.length;
     const message = {
       type: method === "Network.webSocketFrameSent" ? "send" : "receive",
       time: state.webSocketWallTime + params.timestamp - state.requestTimestamp,
       opcode: frame.opcode,
       data,
-      ...(binary ? {_encoding: "base64"} : {}),
-      ...(truncated ? {_truncated: true, _originalLength: frame.payloadData.length} : {})
+      ...(binary ? {_encoding: "base64"} : {})
     };
     if (globalThis.MessageCapture.tag(recording, message)) state.webSocketMessages.push(message);
   } else if (method === "Network.webSocketFrameError") {
-    state.webSocket.error = String(params.errorMessage || "WebSocket error").slice(0, MAX_BODY_CHARS);
+    state.webSocket.error = String(params.errorMessage || "WebSocket error");
     state.failed = true;
     state.failureText = state.webSocket.error;
     if (state.entry) {
@@ -876,6 +899,8 @@ async function requestWillBeSent(source, params) {
       });
     trackTask(redirectTask);
   }
+
+  if (recording.paused) return;
 
   const request = params.request || {};
   if (!isCapturableRequestUrl(request.url)) {
@@ -930,6 +955,9 @@ async function requestWillBeSent(source, params) {
     state.request.postData = postData;
   }
   recording.activeRequests.set(key, state);
+  // Subscribe before responseReceived: a fast response can already have lost
+  // its initial bytes from CDP's response cache by that later event.
+  startResponseStream(state, source);
   notify("recorder-status-changed", {status: recorderStatus()});
 
   if (request.hasPostData && typeof request.postData !== "string") {
@@ -1064,46 +1092,92 @@ async function responseReceived(source, params) {
   } else if (state.response.content.mimeType.split(";")[0].trim().toLowerCase() === "text/event-stream" && !state.sse) {
     globalThis.SseCapture.init(state, "chrome.debugger.response-stream");
     state.sseParser = globalThis.SseCapture.parser(recording, state, headerValue(state.request.headers, "last-event-id") || "");
-    state.ssePendingChunks = [];
-    state.ssePendingChars = 0;
-    state.sseStreamTask = (async () => {
-      try {
-        const result = await chrome.debugger.sendCommand(source, "Network.streamResourceContent", {requestId: params.requestId});
-        if (!recording || state.discarded || state.finalized) return;
-        if (result.bufferedData) {
-          state.sse.bufferedTimestampEstimated = true;
-          feedSseBase64(state, result.bufferedData, Date.now() / 1000);
-        }
-        for (const chunk of state.ssePendingChunks) feedSseBase64(state, chunk.data, chunk.time);
-      } catch (error) {
-        state.sse.captureIncomplete = true;
-        state.sse.captureError = errorMessage(error);
-      } finally {
-        state.ssePendingChunks = null;
-      }
-    })();
-    await state.sseStreamTask;
+    for (const bytes of state.streamChunks || []) {
+      state.sse.bufferedTimestampEstimated = true;
+      state.sseParser.feed(bytes, Date.now() / 1000);
+    }
+  }
+  if (!state.webSocket && !state.sseStreamTask) startResponseStream(state, source);
+  if (state.sseStreamTask) await state.sseStreamTask;
+  if (state.sseParser && state.streamError) {
+    state.sse.captureIncomplete = true;
+    state.sse.captureError = state.streamError;
   }
 }
 
-function feedSseBase64(state, data, time) {
-  const binary = atob(data);
-  const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
-  state.sseParser.feed(bytes, time);
+function startResponseStream(state, source) {
+  const owner = recording;
+  // Stream all HTTP bodies out of CDP's finite response cache as they arrive.
+  // The cache remains a fallback for browsers/resources without streaming.
+  state.streamChunks = [];
+  state.streamBytes = 0;
+  state.ssePendingChunks = [];
+  state.sseStreamTask = (async () => {
+    try {
+      const result = await chrome.debugger.sendCommand(source, "Network.streamResourceContent", {requestId: state.requestId});
+      if (recording !== owner || state.discarded || state.finalized) return;
+      if (typeof result?.bufferedData !== "string") throw new Error("Response streaming unavailable");
+      state.bodyStreaming = true;
+      if (result.bufferedData) {
+        if (state.sse) state.sse.bufferedTimestampEstimated = true;
+        feedResponseBase64(state, result.bufferedData, Date.now() / 1000);
+      }
+      for (const chunk of state.ssePendingChunks) feedResponseBase64(state, chunk.data, chunk.time);
+    } catch (error) {
+      state.bodyStreaming = false;
+      state.streamError = errorMessage(error);
+      state.streamChunks = null;
+      if (state.sseParser) {
+        state.sse.captureIncomplete = true;
+        state.sse.captureError = errorMessage(error);
+      }
+    } finally {
+      state.ssePendingChunks = null;
+    }
+  })();
+  trackTask(state.sseStreamTask);
 }
 
-function sseDataReceived(source, params) {
+function feedResponseBase64(state, data, time) {
+  const binary = atob(data);
+  const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+  state.streamChunks.push(bytes);
+  state.streamBytes += bytes.length;
+  state.sseParser?.feed(bytes, time);
+}
+
+function responseDataReceived(source, params) {
   const state = recording.activeRequests.get(requestKey(source, params.requestId));
-  if (!state?.sseParser || state.discarded || typeof params.data !== "string") return;
+  if (!state || state.discarded || state.finalized) return;
+  state.networkDataBytes = (state.networkDataBytes || 0) + (params.dataLength || 0);
+  if (typeof params.data !== "string") return;
   const time = state.wallTime + params.timestamp - state.requestTimestamp;
   if (state.ssePendingChunks) {
-    if (state.ssePendingChars + params.data.length > MAX_WEBSOCKET_CHARS) {
-      state.sse.captureIncomplete = true;
-      return;
-    }
-    state.ssePendingChars += params.data.length;
     state.ssePendingChunks.push({data: params.data, time});
-  } else feedSseBase64(state, params.data, time);
+  } else if (state.bodyStreaming) feedResponseBase64(state, params.data, time);
+}
+
+function completeStreamBody(state) {
+  if (!state.bodyStreaming || !state.streamChunks) return;
+  const bytes = new Uint8Array(state.streamBytes);
+  let offset = 0;
+  for (const chunk of state.streamChunks) { bytes.set(chunk, offset); offset += chunk.length; }
+  const mime = headerValue(state.response.headers, "content-type") || state.response.content.mimeType || "";
+  if (/^text\//i.test(mime) || /(json|xml|javascript|ecmascript|graphql|x-www-form-urlencoded|svg)/i.test(mime)) {
+    const charset = /charset\s*=\s*([^;]+)/i.exec(mime)?.[1].trim().replace(/^['"]|['"]$/g, "") || "utf-8";
+    let decoder;
+    try { decoder = new TextDecoder(charset); } catch { decoder = new TextDecoder(); }
+    captureBody(state, {body: decoder.decode(bytes), base64Encoded: false});
+  } else {
+    // Encode divisible-by-three chunks to avoid a second full binary string.
+    const chunks = [];
+    for (let index = 0; index < bytes.length; index += 24576) {
+      chunks.push(btoa(String.fromCharCode(...bytes.subarray(index, index + 24576))));
+    }
+    captureBody(state, {body: chunks.join(""), base64Encoded: true});
+  }
+  state.response.content.size = bytes.length;
+  state.streamChunks = null;
 }
 
 function eventSourceMessageReceived(source, params) {
@@ -1132,6 +1206,7 @@ async function loadingFinished(source, params) {
   state.networkDone = true;
   notify("recorder-status-changed", {status: recorderStatus()});
   if (state.sseStreamTask) await state.sseStreamTask;
+  if (recording !== owner || state.finalized) return;
   state.sseParser?.finish();
   if (state.sse) state.sse.captureEnd = "stream-ended";
   state.lastTimestamp = params.timestamp;
@@ -1141,13 +1216,21 @@ async function loadingFinished(source, params) {
     await state.postDataTask;
   }
 
-  if (!state.redirect) {
+  // Some cached/blob resources do not expose their already-received bytes to
+  // streamResourceContent. Compare against network events before trusting it.
+  const streamComplete = state.bodyStreaming && state.streamBytes === (state.networkDataBytes || 0)
+    && (state.streamBytes > 0 || !responseMayHaveBody(state));
+  if (!streamComplete && state.sseParser) state.sse.captureIncomplete = true;
+  if (!state.redirect && !streamComplete) {
     try {
       const result = await getResponseBodyWithRetry(source, params.requestId);
       captureBody(state, result);
+      state.bodyStreaming = false;
+      state.streamChunks = null;
     } catch (error) {
       state.bodyUnavailable = true;
       state.bodyUnavailableReason = errorMessage(error);
+      if (state.bodyStreaming) state.bodyTruncated = true;
     }
   }
   if (recording !== owner || state.finalized) return;
@@ -1180,6 +1263,7 @@ async function loadingFailed(source, params) {
   state.networkDone = true;
   notify("recorder-status-changed", {status: recorderStatus()});
   if (state.sseStreamTask) await state.sseStreamTask;
+  if (recording !== owner || state.finalized) return;
   state.sseParser?.finish();
   if (state.sse) state.sse.captureEnd = "request-failed";
   state.failed = true;
@@ -1238,14 +1322,7 @@ function captureBody(state, result) {
     state.bodyUnavailableReason = "Chrome returned no response body";
     return;
   }
-  const available = MAX_BODY_CHARS;
-  const safeAvailable = result.base64Encoded ? available - (available % 4) : available;
-  if (safeAvailable <= 0) {
-    state.bodyTruncated = true;
-    return;
-  }
-  const body = result.body.slice(0, safeAvailable);
-  state.bodyTruncated = result.body.length > body.length;
+  const body = result.body;
   state.response.content.text = body;
   if (result.base64Encoded) {
     state.response.content.encoding = "base64";
@@ -1257,11 +1334,23 @@ function finalizeRequest(state, finishedTimestamp) {
   if (state.finalized || state.discarded) {
     return;
   }
+  completeStreamBody(state);
   state.finalized = true;
   const end = Number.isFinite(finishedTimestamp) ? finishedTimestamp : state.requestTimestamp;
-  const totalMs = Math.max((end - state.requestTimestamp) * 1000, 0);
+  // requestWillBeSent marks issuance, which can precede the CORS preflight.
+  // ResourceTiming starts at the network stack, after that wait. Convert with
+  // this request's clock pair; keep the original pair for stream timestamps.
+  const networkStart = state.timing?.requestTime;
+  const useNetworkStart = !state.webSocket && !state.fromMemoryCache
+    && !state.fromDiskCache && !state.fromServiceWorker
+    && Number.isFinite(networkStart) && networkStart >= 0 && networkStart <= end;
+  const start = useNetworkStart ? networkStart : state.requestTimestamp;
+  const startedDateTime = useNetworkStart
+    ? new Date((state.wallTime + start - state.requestTimestamp) * 1000).toISOString()
+    : state.startedDateTime;
+  const totalMs = Math.max((end - start) * 1000, 0);
   const entry = {
-    startedDateTime: state.startedDateTime,
+    startedDateTime,
     time: totalMs,
     request: state.request,
     response: state.response,
@@ -1314,7 +1403,7 @@ function finalizeRequest(state, finishedTimestamp) {
     fromCache: entry._fromCache,
     timingSource: entry._breaktest.timingSource,
     timings: entry._breaktest.timingsAvailable === false ? null : entry.timings,
-    startedDateTime: state.startedDateTime,
+    startedDateTime,
     time: totalMs,
     failed: state.failed,
     bodyTruncated: state.bodyTruncated,
@@ -1544,6 +1633,7 @@ function recorderStatus() {
   return {
     ok: true,
     active: !recording.stopping,
+    paused: Boolean(recording.paused),
     attached: recording.attached,
     reconnecting: recording.reconnecting,
     detachReason: recording.detachReason,
@@ -1615,8 +1705,8 @@ function setRecordingBadge(active) {
   // A global badge follows every tab, so explicitly use a tab-specific badge.
   chrome.action.setBadgeText({text: ""}).catch(() => {});
   if (Number.isInteger(owner?.tabId)) {
-    chrome.action.setBadgeText({tabId: owner.tabId, text: active ? "REC" : ""}).catch(() => {});
-    if (active) chrome.action.setBadgeBackgroundColor({tabId: owner.tabId, color: "#c62828"}).catch(() => {});
+    chrome.action.setBadgeText({tabId: owner.tabId, text: active ? (owner.paused ? "Ⅱ" : "REC") : ""}).catch(() => {});
+    if (active) chrome.action.setBadgeBackgroundColor({tabId: owner.tabId, color: owner.paused ? "#b7791f" : "#c62828"}).catch(() => {});
   }
   locatorWrites = locatorWrites.catch(() => {}).then(() => active && owner
     ? chrome.storage.local.set({[RECORDING_LOCATOR_KEY]: {tabId: owner.tabId, startedAt: owner.startedAt}})

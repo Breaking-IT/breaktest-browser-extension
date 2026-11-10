@@ -72,7 +72,8 @@ remains visible when you switch tabs in the same window. This differs from the
 tab-specific recorder panel in Chrome and Edge.
 
 The completed HAR is staged as a browser-local IndexedDB Blob before the Save
-As dialog opens. If saving is cancelled or interrupted, choose **Save HAR** to
+As dialog opens. The background process manages storage and downloads so private
+sidebars do not need direct IndexedDB access. If saving is cancelled or interrupted, choose **Save HAR** to
 retry. The pending export survives closing and reopening the sidebar. It is
 removed after a successful download, explicit discard, or the next cleanup
 after it becomes 24 hours old.
@@ -92,9 +93,8 @@ until the last private window closes.
 
 - Captures HTTP/HTTPS request and response metadata, request bodies, and
   response bodies for the selected tab and its frames.
-- Streams each response through Firefox unchanged while retaining up to 2 MiB
-  per response for the HAR. Larger individual bodies are marked as truncated;
-  there is no recording-wide body limit.
+- Streams each response through Firefox unchanged while retaining the full body
+  for the HAR, with no fixed per-response or recording-wide cap.
 - Captures redirect response streams when Firefox provides them, including
   response bodies on 3xx requests.
 - Keeps requests whose bodies Firefox cannot expose and marks them as
@@ -134,10 +134,9 @@ Each record contains `fileName`, `mimeType`, `size` (original byte count),
 including binary files and empty files. An unavailable record has a `reason`
 and no `content`. The original network request body is not rewritten.
 
-Capture is limited to 20 MiB per file, 64 MiB total original file bytes per
-recording, and 1,000 file records. The HAR reports size-limit failures,
-interrupted reads/transfers, and the file-count limit explicitly. Export waits
-up to five seconds for transfers already accepted by the recorder. Navigation
+File capture has no fixed per-file size, total size, or file-count cap. The HAR
+reports interrupted reads/transfers explicitly. Export gives accepted transfers up to two seconds to finish; unfinished transfers
+are marked unavailable. Navigation
 can interrupt a transfer. Same-file observations may appear more than once if
 the browser supplies different File objects; filenames are not unique IDs.
 
@@ -170,4 +169,16 @@ badge, which now appears only when the recorded tab is selected.
 WebSocket messages include `_breaktest.transactionId` for the transaction active
 at capture time. SSE responses also include incoming messages and receive times
 in `_serverSentEvents`, covering native `EventSource` and `fetch` streams. See
-[the SSE HAR format](../docs/sse-har.md) for fields, limits, and capture diagnostics.
+[the SSE HAR format](../docs/sse-har.md) for fields and capture diagnostics.
+
+## Pause and resume
+
+Select **Pause recording** to skip new requests, file captures, and WebSocket/SSE
+messages without losing recorded data. Requests and file transfers already in
+progress finish capturing. Select **Resume recording** to continue in the same
+transaction. Traffic skipped while paused is not added later. You can still
+change transactions, finish and export, or cancel while paused.
+
+Finishing exports the data already captured even when requests remain pending.
+Unfinished requests are marked incomplete. Capture cleanup has a short deadline;
+unfinished file captures are marked unavailable rather than blocking export.

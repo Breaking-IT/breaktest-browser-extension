@@ -87,7 +87,7 @@ async function main() {
   for (const [first, initiator] of [['FrameSent', 'client'], ['FrameReceived', 'server']]) {
     resetRecording();
     await open();
-    run('recording.activeRequests.values().next().value.webSocketChars = MAX_WEBSOCKET_CHARS');
+    run('recording.activeRequests.values().next().value.webSocketChars = 16 * 1024 * 1024');
     run("Object.assign(recording.entries[0]._breaktest.webSocket, {closeInitiator: 'server', closeInitiatorSource: 'clean-close-without-client-request', closeInitiatorInferred: true})");
     await event(first, {timestamp: 11, response: {opcode: 8, payloadData: 'A+g='}});
     await event(first === 'FrameSent' ? 'FrameReceived' : 'FrameSent', {timestamp: 12, response: {opcode: 8, payloadData: 'A+g='}});
@@ -132,12 +132,12 @@ async function main() {
   await open();
   await event('FrameReceived', {timestamp: 11, response: {opcode: 2, payloadData: 'AAAA'.repeat(600000)}});
   entry = run('recording.entries[0]');
-  assert.equal(entry._webSocketMessages[0].data.length % 4, 0);
-  assert.equal(entry._webSocketMessages[0]._truncated, true);
-  assert.equal(entry._breaktest.webSocket.messagesTruncated, true);
-  run('recording.activeRequests.values().next().value.webSocketMessages.length = MAX_WEBSOCKET_MESSAGES');
+  assert.equal(entry._webSocketMessages[0].data, "AAAA".repeat(600000));
+  assert.equal(entry._webSocketMessages[0]._truncated, undefined);
+  assert.equal(entry._breaktest.webSocket.messagesTruncated, false);
+  run('recording.activeRequests.values().next().value.webSocketMessages.length = 10000');
   await event('FrameSent', {timestamp: 12, response: {opcode: 1, payloadData: 'overflow'}});
-  assert.equal(entry._breaktest.webSocket.droppedMessages, 1);
+  assert.equal(entry._breaktest.webSocket.droppedMessages, 0);
 
   resetRecording();
   await open();
@@ -169,10 +169,10 @@ async function main() {
 
   resetRecording();
   await open();
-  run('recording.activeRequests.values().next().value.webSocketChars = MAX_WEBSOCKET_CHARS');
+  run('recording.activeRequests.values().next().value.webSocketChars = 16 * 1024 * 1024');
   await event('FrameSent', {timestamp: 11, response: {opcode: 1, payloadData: 'too much'}});
-  assert.equal(run('recording.entries[0]._webSocketMessages.length'), 0);
-  assert.equal(run('recording.entries[0]._breaktest.webSocket.droppedMessages'), 1);
+  assert.equal(run('recording.entries[0]._webSocketMessages.length'), 1);
+  assert.equal(run('recording.entries[0]._breaktest.webSocket.droppedMessages'), 0);
 
   resetRecording();
   await open(undefined, 403);

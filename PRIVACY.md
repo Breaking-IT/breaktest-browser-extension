@@ -49,19 +49,24 @@ secondary purpose.
 Chrome active recording data is kept in extension memory. Firefox also saves
 recovery checkpoints while recording, including request/response bodies and
 captured files. Normal Firefox checkpoints use browser-local IndexedDB; private
-recording checkpoints use memory-only extension session storage. Session markers
+recording checkpoints use encrypted browser-local IndexedDB. Private checkpoints
+are encrypted with AES-GCM using a random key per recording, kept only in
+memory-only extension session storage. Session markers
 prevent resuming a recording against a reused tab ID after a browser restart.
 Checkpoints are removed after successful export staging or explicit discard.
-Abandoned normal checkpoints are removed when the background next starts without
+Abandoned checkpoints are removed when the background next starts without
 a matching session marker. Removing the extension removes its IndexedDB data.
-Private checkpoints disappear when the browser session ends and are subject to
-session-storage limits; a storage failure is reported in the recorder. After a
+Private checkpoint keys disappear when the browser session ends, making any
+remaining encrypted checkpoint unreadable. Recording payloads do not use session
+storage and have no fixed recovery size cap. The extension requests unlimited
+storage; available disk space and browser resource limits still apply. Storage
+failures are reported without preventing active recording or export. After a
 background restart, completed requests are recovered and unfinished requests are
-marked interrupted. Traffic missed during the restart cannot be reconstructed. The recorder retains at most 2 MiB
-of body text for each response and marks larger bodies as truncated. File capture
-is limited to 20 MiB per file, 64 MiB total file bytes, and 1,000 file records per
-recording. Files are embedded as base64 in the HAR; incomplete or oversized
-files are marked unavailable. Content scripts check for an active recording in
+marked interrupted. Traffic missed during the restart cannot be reconstructed. The recorder imposes no fixed body, message, file-size, total-size, or capture-count
+caps. Available memory, disk space, and browser API capabilities still constrain
+capture. Both extensions request unlimited storage to avoid per-extension storage
+quotas. Files are embedded as base64 in the HAR; interrupted or failed transfers
+are marked unavailable. Content scripts check for an active recording in
 the selected tab before reading file bytes. Existing file selections are included
 when recording starts. Selected files may never actually be uploaded.
 

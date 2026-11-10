@@ -8,10 +8,7 @@
 
 /* File bytes live in the recording, never in extension storage or page messages. */
 globalThis.UploadStore = (() => {
-  const MAX_FILE_BYTES = 20 * 1024 * 1024;
-  const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
   const CHUNK_BYTES = 192 * 1024; // Divisible by three, so base64 chunks can be joined.
-  const MAX_FILES = 1000;
 
   function state(owner) {
     return owner.uploadCapture ||= {
@@ -24,23 +21,19 @@ globalThis.UploadStore = (() => {
     if (!owner || sender.tab?.id !== owner.tabId) return {ok: false};
     const capture = state(owner);
     if (message.type === "upload-status") {
-      return {ok: !owner.stopping, token: capture.token};
+      return {ok: !owner.stopping && !owner.paused, token: capture.token};
     }
     if (message.token !== capture.token) return {ok: false};
     if (message.type === "upload-begin") {
-      if (owner.stopping) return {ok: false};
-      if (capture.files.length >= MAX_FILES) {
-        capture.fileLimitReached = true;
-        return {ok: false};
-      }
+      if (owner.stopping || owner.paused) return {ok: false};
       const meta = message.file;
       if (!meta || typeof meta.name !== "string" || !Number.isSafeInteger(meta.size) || meta.size < 0) {
         return {ok: false};
       }
       const file = {
-        id: crypto.randomUUID(), fileName: meta.name.slice(0, 4096), size: meta.size,
-        mimeType: String(meta.mimeType || "application/octet-stream").slice(0, 256),
-        fieldName: String(meta.fieldName || "").slice(0, 4096),
+        id: crypto.randomUUID(), fileName: meta.name, size: meta.size,
+        mimeType: String(meta.mimeType || "application/octet-stream"),
+        fieldName: String(meta.fieldName || ""),
         source: ["input", "drop", "formdata"].includes(meta.source) ? meta.source : "input",
         pageUrl: sender.url || "", frameId: sender.frameId,
         capturedDateTime: new Date().toISOString(),
@@ -48,17 +41,12 @@ globalThis.UploadStore = (() => {
         status: "pending", encoding: "base64"
       };
       capture.files.push(file);
-      if (file.size > MAX_FILE_BYTES || capture.reservedBytes + file.size > MAX_TOTAL_BYTES) {
-        file.status = "unavailable";
-        file.reason = file.size > MAX_FILE_BYTES ? "file-size-limit" : "recording-size-limit";
-        return {ok: false};
-      }
       capture.reservedBytes += file.size;
       let resolve;
       const done = new Promise(callback => { resolve = callback; });
       capture.transfers.set(file.id, {
         file, chunks: [], bytes: 0, frameId: sender.frameId, documentId: sender.documentId,
-        done, resolve
+        done, resolve, lastProgress: Date.now()
       });
       return {ok: true, id: file.id, chunkBytes: CHUNK_BYTES};
     }
@@ -81,6 +69,7 @@ globalThis.UploadStore = (() => {
       }
       transfer.chunks.push(data);
       transfer.bytes += bytes;
+      transfer.lastProgress = Date.now();
       return {ok: true};
     }
     if (message.type === "upload-end") {
@@ -99,16 +88,27 @@ globalThis.UploadStore = (() => {
     transfer.resolve();
   }
 
-  async function settle(owner, timeoutMs = 5000) {
+  async function settle(owner, timeoutMs = 5000, maxWaitMs = Infinity) {
     if (!owner.uploadCapture) return;
     const capture = owner.uploadCapture;
-    let timer;
-    await Promise.race([
-      Promise.all([...capture.transfers.values()].map(item => item.done)),
-      new Promise(resolve => { timer = setTimeout(resolve, timeoutMs); })
-    ]);
-    clearTimeout(timer);
-    for (const transfer of capture.transfers.values()) finish(capture, transfer, "recording-stopped");
+    // Allow progressing transfers to drain, subject to an optional total
+    // deadline when finishing a recording. Also abandon stalled transfers.
+    const settlingAt = Date.now();
+    while (capture.transfers.size) {
+      let timer;
+      const remaining = Math.min(Math.max(1, maxWaitMs - (Date.now() - settlingAt)), [...capture.transfers.values()].reduce((wait, item) =>
+        Math.min(wait, Math.max(1, timeoutMs - (Date.now() - Math.max(item.lastProgress, settlingAt)))), timeoutMs));
+      await Promise.race([
+        Promise.all([...capture.transfers.values()].map(item => item.done)),
+        new Promise(resolve => { timer = setTimeout(resolve, remaining); })
+      ]);
+      clearTimeout(timer);
+      for (const transfer of capture.transfers.values()) {
+        if (Date.now() - settlingAt >= maxWaitMs || Date.now() - Math.max(transfer.lastProgress, settlingAt) >= timeoutMs) {
+          finish(capture, transfer, "recording-stopped");
+        }
+      }
+    }
   }
 
   async function install(api, owner) {
@@ -140,7 +140,6 @@ globalThis.UploadStore = (() => {
     if (!capture?.files.length) return undefined;
     return {
       version: 1, files: capture?.files || [],
-      maxFileBytes: MAX_FILE_BYTES, maxTotalBytes: MAX_TOTAL_BYTES,
       fileLimitReached: Boolean(capture?.fileLimitReached),
       installationError: capture?.installationError || null,
       scope: "Files selected, dropped, or observed in formdata; not proof of upload or a request association."

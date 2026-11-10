@@ -3,9 +3,7 @@
 // Native webRequest handshakes and isolated content-script message capture are
 // correlated in creation order within each frame and URL. No page message bridge.
 globalThis.WebSocketStore = (() => {
-  const MAX_CHARS = 16 * 1024 * 1024;
-  const MAX_MESSAGE_CHARS = 2 * 1024 * 1024;
-  const MAX_MESSAGES = 10000;
+
   function capture(owner) {
     return owner.webSocketCapture ||= {
       token: crypto.randomUUID(), sockets: new Map(), handshakes: [], installationError: null
@@ -44,7 +42,7 @@ globalThis.WebSocketStore = (() => {
     if (!owner || sender.tab?.id !== owner.tabId) return {ok: false};
     const store = capture(owner);
     if (message.type === "websocket-begin") {
-      if (owner.stopping || !Number.isFinite(message.time) || message.time < owner.startedAt
+      if (owner.stopping || owner.paused || !Number.isFinite(message.time) || message.time < owner.startedAt
           || typeof message.id !== "string" || message.id.length > 128
           || typeof message.url !== "string" || !/^wss?:\/\//i.test(message.url)) return {ok: false};
       const key = `${sender.documentId || sender.frameId}:${message.id}`;
@@ -65,13 +63,7 @@ globalThis.WebSocketStore = (() => {
     if (message.type === "websocket-message") {
       const item = message.message;
       if (!item || !["send", "receive"].includes(item.type) || ![1, 2].includes(item.opcode)
-          || !Number.isFinite(item.time) || typeof item.data !== "string"
-          || item.data.length > MAX_MESSAGE_CHARS) return {ok: false};
-      if (socket.messages.length >= MAX_MESSAGES || socket.chars + item.data.length > MAX_CHARS) {
-        socket.metadata.messagesTruncated = true;
-        socket.metadata.droppedMessages++;
-        return {ok: true};
-      }
+          || !Number.isFinite(item.time) || typeof item.data !== "string") return {ok: false};
       if (item.opcode === 2 && (item.data.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(item.data))) return {ok: false};
       const frame = {type: item.type, time: item.time, opcode: item.opcode, data: item.data};
       if (!globalThis.MessageCapture.tag(owner, frame)) return {ok: true};

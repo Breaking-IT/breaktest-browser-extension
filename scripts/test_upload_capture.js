@@ -47,7 +47,7 @@ async function test(browser) {
   send({type: "upload-end", token, id: zero.id});
   assert.equal(store.exportFiles(owner).files[1].content, "");
   begin(21 * 1024 * 1024);
-  assert.equal(store.exportFiles(owner).files[2].reason, "file-size-limit");
+  assert.equal(store.exportFiles(owner).files[2].status, "pending");
   const bad = begin(3);
   assert.equal(send({type: "upload-chunk", token, id: bad.id, data: "%%%="}).ok, false);
   assert.equal(store.exportFiles(owner).files[3].reason, "invalid-chunk");
@@ -122,12 +122,36 @@ async function test(browser) {
   send({type: "upload-end", token: currentToken, id: pending.id});
   await settled;
   assert.equal(store.exportFiles(owner).files.at(-1).content, "AQID");
+  owner.stopping = false;
+  const progressing = send({type: "upload-begin", token: currentToken, file: {name: "progressing", size: 3 * 192 * 1024}});
+  owner.stopping = true;
+  const progressSettled = store.settle(owner, 200);
+  const data = Buffer.alloc(progressing.chunkBytes).toString('base64');
+  for (let index = 0; index < 3; index++) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(send({type: "upload-chunk", token: currentToken, id: progressing.id, data}).ok, true);
+  }
+  send({type: "upload-end", token: currentToken, id: progressing.id});
+  await progressSettled;
+  assert.equal(store.exportFiles(owner).files.at(-1).status, 'complete', 'progress keeps transfers alive beyond the idle timeout');
+  owner.stopping = false;
+  send({type: "upload-begin", token: currentToken, file: {name: "deadline", size: 3}});
+  owner.stopping = true;
+  await store.settle(owner, 1000, 5);
+  assert.equal(store.exportFiles(owner).files.at(-1).status, 'unavailable', 'total finish deadline ends transfers before the idle timeout');
+  assert.equal(store.exportFiles(owner).files.at(-1).reason, 'recording-stopped');
   owner = {tabId: 7, currentTransaction: {id: "old"}};
   const limitToken = send({type: "upload-status"}).token;
   for (let i = 0; i < 4; i++) {
     send({type: "upload-begin", token: limitToken, file: {name: "large", size: 20 * 1024 * 1024}});
   }
-  assert.equal(store.exportFiles(owner).files.at(-1).reason, "recording-size-limit");
+  assert.equal(store.exportFiles(owner).files.at(-1).status, "pending");
+  for (let i = 0; i < 1001; i++) {
+    const empty = send({type: "upload-begin", token: limitToken, file: {name: "empty", size: 0}});
+    assert.equal(empty.ok, true);
+    send({type: "upload-end", token: limitToken, id: empty.id});
+  }
+  assert.equal(store.exportFiles(owner).files.length, 1005);
   store.removeTransaction(owner, "old", "new");
   assert.ok(store.exportFiles(owner).files.every(item => item.transactionId === "new"));
   store.removeTransaction(owner, "new");

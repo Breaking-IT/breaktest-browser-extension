@@ -173,13 +173,14 @@ def validate() -> list[str]:
             errors.append(f"{browser}: recorder start actions do not enforce consent")
         if 'RECORDING_CONSENT_KEY = "recordingDisclosureAcceptedVersion"' not in panel_script:
             errors.append(f"{browser}: accepted disclosure version is not stored")
-        if "RECORDING_DISCLOSURE_VERSION = 3" not in panel_script:
-            errors.append(f"{browser}: recording disclosure version must cover selected file content capture")
+        if "RECORDING_DISCLOSURE_VERSION = 4" not in panel_script:
+            errors.append(f"{browser}: recording disclosure version must cover current storage and capture practices")
         if "function showPrivacySettings()" not in panel_script or "privacy-settings-button" not in panel:
             errors.append(f"{browser}: saved consent cannot be reviewed from the recorder")
         if "consentVersion: RECORDING_DISCLOSURE_VERSION" not in panel_script:
             errors.append(f"{browser}: private-window launches do not carry consent state")
-        if "saveAs: true" not in panel_script:
+        export_source = panel_script if browser == "chrome" else (browser_dir / "har-export-store.js").read_text(encoding="utf-8")
+        if "saveAs: true" not in export_source:
             errors.append(f"{browser}: HAR export does not require a Save As dialog")
         if "Start recording" not in panel or "blank-start-button" in panel:
             errors.append(f"{browser}: start actions must use Start recording without a new-tab button")
@@ -227,10 +228,16 @@ def validate() -> list[str]:
             errors.append(f"{browser}: completed HARs are not staged outside extension messaging")
         if "return {ok: true, har" in background_source:
             errors.append(f"{browser}: completed HARs must not cross the extension message boundary")
-        if "HarExportStore.get(exportDescriptor.id)" not in panel_script:
+        if browser == "chrome" and "HarExportStore.get(exportDescriptor.id)" not in panel_script:
             errors.append(f"{browser}: recorder UI cannot load a staged HAR export")
-        if "HarExportStore.remove(pendingExport.id)" not in panel_script:
+        if browser == "chrome" and "HarExportStore.remove(pendingExport.id)" not in panel_script:
             errors.append(f"{browser}: staged HAR exports are not removed after use or discard")
+        if browser == "firefox":
+            if "har-export-store.js" in panel_script or "indexedDB" in panel_script:
+                errors.append("firefox: private sidebars must not access IndexedDB directly")
+            for command in ("har-export-latest", "har-export-download", "har-export-remove"):
+                if command not in panel_script or command not in background_source:
+                    errors.append(f"firefox: missing background export command {command}")
         if "response.har" in panel_script or "pendingHar" in panel_script:
             errors.append(f"{browser}: recorder UI still expects a monolithic HAR message")
         if not (browser_dir / "har-export-store.js").is_file():

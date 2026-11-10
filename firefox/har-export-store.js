@@ -173,8 +173,60 @@
     }
   }
 
+  // The background owns download URLs so closing/reopening the sidebar does
+  // not revoke them, and a private sidebar never touches IndexedDB.
+  const downloads = new Map();
+  function download(id, {incognito = false} = {}) {
+    if (downloads.has(id)) return downloads.get(id);
+    const pending = (async () => {
+      const record = await get(id);
+      if (!record?.blob) throw new Error("The completed HAR is no longer available in local storage");
+      const url = URL.createObjectURL(record.blob);
+      try {
+        const downloadId = await browser.downloads.download({url, filename: record.filename, saveAs: true, incognito});
+        await waitForDownload(downloadId);
+        await remove(id);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    })().finally(() => downloads.delete(id));
+    downloads.set(id, pending);
+    return pending;
+  }
+
+  function waitForDownload(downloadId) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = error => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        browser.downloads.onChanged.removeListener(onChanged);
+        error ? reject(error) : resolve();
+      };
+      const inspect = item => {
+        if (item?.state === "complete") {
+          finish();
+        } else if (item?.state === "interrupted") {
+          finish(new Error(item.error || "The download was interrupted"));
+        }
+      };
+      const onChanged = delta => {
+        if (delta.id === downloadId && delta.state) {
+          inspect({state: delta.state.current, error: delta.error?.current});
+        }
+      };
+      browser.downloads.onChanged.addListener(onChanged);
+      browser.downloads.search({id: downloadId})
+        .then(items => inspect(items[0]))
+        .catch(finish);
+    });
+  }
+
   globalThis.HarExportStore = Object.freeze({
     cleanupStale,
+    download,
     get,
     latest,
     remove,

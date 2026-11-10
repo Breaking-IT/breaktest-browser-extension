@@ -9,6 +9,7 @@ const listener = () => ({listeners: [], addListener(fn) { this.listeners.push(fn
 const context = {
   console,
   atob,
+  btoa,
   crypto: require("node:crypto").webcrypto,
   URL,
   URLSearchParams,
@@ -428,6 +429,8 @@ async function testNetworkPendingBeforeBodyCapture() {
     assert.strictEqual(vm.runInContext('transactionDetails("t1").transaction.pendingCount', context), 0);
     assert.strictEqual(statuses.at(-1), 0);
     assert.strictEqual(vm.runInContext('recording.entries.length', context), 0, 'bodies have not finished processing');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.strictEqual(releases.length, 4);
     for (const release of releases) release({body: 'saved', base64Encoded: false});
     await Promise.all(completions);
     assert.strictEqual(vm.runInContext('recording.entries.length', context), 4);

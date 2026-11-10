@@ -30,7 +30,7 @@ const http = require('node:http');
           extension: {inIncognitoContext: false},
           windows: {getCurrent: async () => ({id: 1, incognito: false})},
           tabs: {query: async () => [{id: 1, windowId: 1, url: 'https://example.test/already-loaded'}]},
-          storage: {local: {get: async () => ({recordingDisclosureAcceptedVersion: 3}), set: async () => {}, remove: async () => {}}},
+          storage: {local: {get: async () => ({recordingDisclosureAcceptedVersion: 4}), set: async () => {}, remove: async () => {}}},
           runtime: {
             connect: () => ({onDisconnect: {addListener(fn) { window.disconnectRecorder = fn; }}}), onMessage: {addListener(fn) { window.receiveRecorderMessage = fn; }},
             sendMessage: async message => {
@@ -38,6 +38,8 @@ const http = require('node:http');
               if (message.type === 'start-recording') {
                 status = {ok: true, active: true, currentTransaction: {id: 't1', name: message.transactionName}, transactions: []};
               }
+              if (message.type === 'pause-recording') status.paused = true;
+              if (message.type === 'resume-recording') status.paused = false;
               if (message.type === 'new-transaction') {
                 if (window.failNext) { window.failNext = false; return {ok: false, error: 'Try again'}; }
                 status.currentTransaction = {id: 't2', name: message.name};
@@ -57,6 +59,14 @@ const http = require('node:http');
       await page.locator('#transaction-name').fill('UC1_01_Homepage');
       await page.locator('#start-button').click();
       await page.waitForFunction(() => !document.querySelector('#next-transaction-button').disabled);
+      await page.locator('#pause-button').click();
+      await page.waitForFunction(() => document.querySelector('#pause-button').getAttribute('aria-label') === 'Resume recording' && !document.querySelector('#pause-button').disabled);
+      assert.ok(await page.locator('#recording-indicator').evaluate(el => el.classList.contains('paused')));
+      assert.equal(await page.locator('#stop-button').isEnabled(), true);
+      // A restored paused status keeps the resume control available.
+      await page.evaluate(() => receiveRecorderMessage({type: 'recorder-status-changed', status: {ok: true, active: true, paused: true, currentTransaction: {id: 't1', name: 'UC1_01_Homepage'}}}));
+      await page.locator('#pause-button').click();
+      await page.waitForFunction(() => document.querySelector('#pause-button').getAttribute('aria-label') === 'Pause recording' && !document.querySelector('#pause-button').disabled);
       const start = await page.evaluate(() => sent.find(message => message.type === 'start-recording'));
       assert.equal(start.startUrl, '');
       assert.ok(!start.createBlankTab);

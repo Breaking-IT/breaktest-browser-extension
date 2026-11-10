@@ -55,8 +55,16 @@ async function main() {
   SseCapture.init(bounded, 'test');
   const boundedParser = SseCapture.parser(session(), bounded);
   boundedParser.feed(Buffer.from('data: ' + 'x'.repeat(2 * 1024 * 1024 + 1) + '\n\ndata: valid\n\n'), 1.5);
-  assert.equal(bounded.sse.droppedMessages, 1);
-  assert.equal(bounded.serverSentEvents[0].data, 'valid');
+  assert.equal(bounded.sse.droppedMessages, 0);
+  assert.equal(bounded.serverSentEvents[0].data.length, 2 * 1024 * 1024 + 1);
+  assert.equal(bounded.serverSentEvents[1].data, 'valid');
+
+  for (let index = 0; index < 10001; index++) SseCapture.append(session(), bounded, {
+    type: 'receive', time: 1.5, eventName: 'e'.repeat(5000), eventId: 'i'.repeat(5000), data: 'x'.repeat(2048)
+  });
+  assert.equal(bounded.serverSentEvents.length, 10003);
+  assert.equal(bounded.serverSentEvents.at(-1).eventName.length, 5000);
+  assert.equal(bounded.sse.messagesTruncated, false);
 
   resetRecording();
   run(`recording.transactions[0].startedDateTime = new Date(1800000000000).toISOString();

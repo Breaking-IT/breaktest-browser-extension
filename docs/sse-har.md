@@ -63,16 +63,11 @@ header when present.
 `request-failed`, or `recording-stopped`. Stopping recording does not disconnect
 the application's stream.
 
-Capture is bounded to 10,000 events and 16 Mi UTF-16 data characters per response,
-with a 2 Mi character per-event limit. Native Chromium events can be truncated
-with `_truncated` and `_originalLength`. The streaming parser drops oversized
-events and resumes at the next event boundary. Event name and ID are capped at
-4,096 characters, with `_metadataTruncated` when shortened. These conditions set
-`messagesTruncated`; dropped events increment `droppedMessages`.
+Capture has no fixed event-size, total-size, event-count, event-name, or event-ID
+cap. Truncation fields remain supported when reading older recordings.
 
 `captureIncomplete` flags unavailable capture or lost input, with `captureError`
 when a browser command failed. `partialEventAtEnd` identifies unfinished input at
-EOF or recording stop. SSE capture limits are independent of normal HTTP body
-capture limits. A saved HTTP body may therefore be truncated even when the event
-array contains all events. Message contents can contain application secrets, as
+EOF or recording stop. Browser API failures and available resources can still
+prevent complete capture. Message contents can contain application secrets, as
 can other HAR bodies.

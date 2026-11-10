@@ -11,7 +11,7 @@ function background(storage) {
     commands: {onCommand: event()},
     action: {onClicked: event(), setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {}},
     sidebarAction: {open: async () => {}},
-    runtime: {onConnect: event(), onMessage: event(), getManifest: () => ({version: 'test'}), sendMessage: async message => notices.push(message)},
+    runtime: {onConnect: event(), onMessage: event(), getURL: name => 'moz-extension://test/' + name, getManifest: () => ({version: 'test'}), sendMessage: async message => notices.push(message)},
     tabs: {onRemoved: event(), get: async id => {
       if (storage.closed) throw new Error('Tab closed');
       return {id, url: 'https://example.test/', incognito: !!storage.private};
@@ -43,13 +43,13 @@ function background(storage) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../firefox', file), 'utf8'), context, {filename: file});
   }
   return {context, api, filters, notices, run: code => vm.runInContext(code, context),
-    send: message => api.runtime.onMessage.listeners[0](message, {})};
+    send: (message, sender = {}) => api.runtime.onMessage.listeners[0](message, sender)};
 }
-async function request(bg, id, finish = true) {
+async function request(bg, id, finish = true, body = "response " + id) {
   const details = {tabId: 1, requestId: id, url: 'https://example.test/' + id, method: 'GET', type: 'xmlhttprequest', timeStamp: 1000};
   await bg.api.webRequest.onBeforeRequest.listeners[0](details);
   await bg.api.webRequest.onResponseStarted.listeners[0]({...details, timeStamp: 1010, statusCode: 200, responseHeaders: [{name: 'content-type', value: 'text/plain'}]});
-  bg.filters.get(id).ondata({data: new TextEncoder().encode('response ' + id).buffer});
+  bg.filters.get(id).ondata({data: new TextEncoder().encode(body).buffer});
   if (finish) {
     bg.filters.get(id).onstop();
     await bg.api.webRequest.onCompleted.listeners[0]({...details, timeStamp: 1020, statusCode: 200});
@@ -64,6 +64,10 @@ async function request(bg, id, finish = true) {
     await request(bg, 'complete');
     await request(bg, 'in-flight', false);
     await bg.send({type: 'new-transaction', name: '02_Next'});
+    assert.equal((await bg.send({type: 'pause-recording'})).paused, true);
+    await bg.api.webRequest.onBeforeRequest.listeners[0]({tabId: 1, requestId: 'paused', url: 'https://example.test/skip', timeStamp: 1030});
+    assert.equal(bg.filters.has('paused'), false);
+
     assert.equal(storage.saved.entries[0].response.content.text, 'response complete');
     assert.equal(storage.saved.incognito, privateMode);
     // A new VM has no globals, response filters, or ports from the old background.
@@ -78,12 +82,14 @@ async function request(bg, id, finish = true) {
     const status = await statusPromise;
     delete storage.gate;
     assert.equal(status.active, true);
+    assert.equal(status.paused, true);
     assert.equal(status.currentTransaction.name, '02_Next');
     assert.equal(status.requestCount, 2);
     assert.equal(status.pendingCount, 0);
     assert.match(status.recoveryNotice, /recovered/);
     assert.equal(storage.saved.entries[1]._breaktest.incomplete, true);
     assert.equal(storage.saved.entries[1].response.content.text, 'response in-flight');
+    assert.equal((await bg.send({type: 'resume-recording'})).paused, false);
     await request(bg, 'after-restart');
     assert.equal(storage.saved.entries.length, 3);
     await assert.rejects(bg.send({type: 'start-recording', tabId: 1, transactionName: 'overwrite'}), /already exists/);
@@ -110,6 +116,15 @@ async function request(bg, id, finish = true) {
     assert.equal((await bg.send({type: 'recorder-status'})).attached, false);
     assert.equal((await bg.send({type: 'stop-recording'})).export.entryCount, 1);
   }
+  const largeStorage = {};
+  const large = background(largeStorage);
+  await large.send({type: 'start-recording', tabId: 1, transactionName: 'Full body'});
+  const largeBody = 'x'.repeat(3 * 1024 * 1024) + 'tail';
+  await request(large, 'large', true, largeBody);
+  assert.equal(largeStorage.saved.entries[0].response.content.text, largeBody);
+  assert.equal(largeStorage.saved.entries[0]._breaktest.bodyTruncated, false);
+  await large.send({type: 'stop-recording'});
+  assert.equal(largeStorage.har.log.entries[0].response.content.text, largeBody);
   const pending = background({});
   await pending.send({type: 'start-recording', tabId: 1, transactionName: 'Pending lifecycle'});
   await request(pending, 'body-draining', false);
@@ -141,12 +156,19 @@ async function request(bg, id, finish = true) {
   await failing.send({type: 'start-recording', tabId: 1, transactionName: '01_Save'});
   await request(failing, 'retained');
   failureStorage.fail = true;
-  await assert.rejects(failing.send({type: 'new-transaction', name: '02_NotSaved'}), /Storage full/);
+  await failing.send({type: 'new-transaction', name: '02_NotSaved'});
   assert.match((await failing.send({type: 'recorder-status'})).persistenceError, /Storage full/);
   assert.equal(failureStorage.saved.entries.length, 1, 'last good checkpoint remains intact');
+  assert.equal((await failing.send({type: 'recorder-status'})).currentTransaction.name, '02_NotSaved');
   failureStorage.fail = false;
   await failing.send({type: 'new-transaction', name: '03_Retry'});
   assert.equal((await failing.send({type: 'recorder-status'})).persistenceError, null);
+  failureStorage.fail = true;
+  assert.equal((await failing.send({type: 'stop-recording'})).export.entryCount, 1,
+    'checkpoint failures do not block export');
+  const noStorage = background({fail: true});
+  assert.equal((await noStorage.send({type: 'start-recording', tabId: 1, transactionName: 'No storage'})).active, true);
+  assert.match((await noStorage.send({type: 'recorder-status'})).persistenceError, /Storage full/);
   const concurrent = background({});
   const starts = await Promise.allSettled([
     concurrent.send({type: 'start-recording', tabId: 1, transactionName: 'one'}),
@@ -154,5 +176,22 @@ async function request(bg, id, finish = true) {
   ]);
   assert.equal(starts.filter(result => result.status === 'fulfilled').length, 1);
   assert.equal((await concurrent.send({type: 'recorder-status'})).currentTransaction.name, 'one');
+  const exporter = background({});
+  const sidebarSender = {url: 'moz-extension://test/sidebar.html', tab: {incognito: true}};
+  const exportCalls = [];
+  exporter.context.HarExportStore.latest = async () => ({id: 'staged', entryCount: 1});
+  exporter.context.HarExportStore.download = async (id, options) => { exportCalls.push({id, incognito: options.incognito}); };
+  exporter.context.HarExportStore.remove = async id => { exportCalls.push({removed: id}); };
+  await exporter.send({type: 'recorder-status'});
+  exporter.run('recoveryError = "Recovery unavailable"');
+  const pendingExport = await exporter.send({type: 'har-export-latest'}, sidebarSender);
+  assert.equal(pendingExport.export.id, 'staged', 'completed exports remain accessible despite recording recovery errors');
+  await exporter.send({type: 'har-export-download', id: 'staged', incognito: true}, sidebarSender);
+  assert.deepEqual(exportCalls[0], {id: 'staged', incognito: true});
+  await exporter.send({type: 'har-export-remove', id: 'staged'}, sidebarSender);
+  assert.deepEqual(exportCalls[1], {removed: 'staged'});
+  await assert.rejects(exporter.send({type: 'har-export-download', id: 'staged'},
+    {url: 'https://example.test/', tab: {id: 1}}), /only be managed from the recorder sidebar/);
+  assert.equal(exportCalls.length, 2, 'content scripts cannot trigger downloads or manage exports');
   console.log('Firefox recovery: restart, bodies, in-flight requests, gating, private mode, export failure, discard and closed tab passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
