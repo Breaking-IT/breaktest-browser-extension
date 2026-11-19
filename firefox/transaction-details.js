@@ -18,8 +18,11 @@ let loadSequence = 0;
 let timelineSpan = 1;
 let showCached = false;
 const cacheToggle = document.querySelector("#cache-toggle");
+const saveButton = document.querySelector("#save-waterfall");
+const exportStatus = document.querySelector("#waterfall-export-status");
 const tooltip = document.querySelector("#request-timing-tooltip");
 cacheToggle.addEventListener("click", () => { showCached = !showCached; render(); });
+saveButton.addEventListener("click", saveWaterfall);
 document.querySelector(".request-detail-table-wrap").addEventListener("scroll", clearHover);
 document.addEventListener("keydown", event => { if (event.key === "Escape") clearHover(); });
 window.addEventListener("resize", clearHover);
@@ -66,6 +69,82 @@ function clearHover() {
   tooltip.hidden = true;
   table.classList.remove("waterfall-hovering");
   hoverLabel.textContent = "Hover over the waterfall to inspect elapsed time";
+}
+
+async function saveWaterfall() {
+  const filename = title.textContent.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim().slice(0, 100);
+  saveButton.disabled = true;
+  exportStatus.textContent = "Preparing PNG…";
+  try {
+    const png = await renderWaterfallImage();
+    const url = URL.createObjectURL(png);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${filename || "transaction"}-waterfall.png`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    exportStatus.textContent = "";
+  } catch (error) {
+    console.error("Unable to export waterfall", error);
+    exportStatus.textContent = error.message || "Could not create the waterfall PNG.";
+  } finally {
+    saveButton.disabled = false;
+  }
+}
+
+async function renderWaterfallImage() {
+  const main = document.querySelector(".request-detail-main");
+  const scroller = main.querySelector(".request-detail-table-wrap");
+  const width = main.clientWidth + Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+  const snapshot = document.createElement("div");
+  snapshot.className = document.body.className;
+  Object.assign(snapshot.style, {
+    width: `${width}px`, minHeight: "0", background: "var(--background)", color: "var(--text)"
+  });
+  const theme = getComputedStyle(document.documentElement);
+  for (const property of Array.from(theme).filter(name => name.startsWith("--"))) {
+    snapshot.style.setProperty(property, theme.getPropertyValue(property));
+  }
+  snapshot.style.fontFamily = theme.fontFamily;
+
+  const content = main.cloneNode(true);
+  content.style.minHeight = "0";
+  content.querySelectorAll(".waterfall-export, #cache-toggle, #waterfall-hover-time").forEach(node => node.remove());
+  content.querySelector("h1").style.whiteSpace = "normal";
+  content.querySelector("h1").style.overflowWrap = "anywhere";
+  Object.assign(content.querySelector(".request-detail-table-wrap").style, {maxHeight: "none", overflow: "visible"});
+  content.querySelectorAll("th").forEach(cell => { cell.style.position = "static"; });
+  content.querySelector(".request-detail-table").classList.remove("waterfall-hovering");
+  snapshot.append(content);
+
+  // Measure the expanded table offscreen, so the live view keeps its scroll position.
+  const measure = document.createElement("div");
+  Object.assign(measure.style, {position: "fixed", left: "-100000px", top: "0", visibility: "hidden"});
+  measure.append(snapshot);
+  document.body.append(measure);
+  const height = Math.ceil(snapshot.getBoundingClientRect().height);
+  measure.remove();
+
+  const styles = document.createElement("style");
+  const stylesheet = document.querySelector('link[rel="stylesheet"]').sheet;
+  styles.textContent = Array.from(stylesheet.cssRules, rule => rule.cssText).join("\n");
+  snapshot.prepend(styles);
+  const markup = new XMLSerializer().serializeToString(snapshot);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><foreignObject width="100%" height="100%">${markup}</foreignObject></svg>`;
+  const image = new Image();
+  // A self-contained data URL keeps the rendered HTML readable by the canvas.
+  image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  await image.decode();
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (context) {
+    context.drawImage(image, 0, 0);
+    const png = await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
+    if (png) return png;
+  }
+  throw new Error("This waterfall is too large to save as a single PNG in this browser.");
 }
 
 function isCacheOnly(request) {
@@ -178,6 +257,7 @@ function render() {
     return;
   }
   title.textContent = transaction.name;
+  saveButton.hidden = false;
   document.title = `${transaction.name} · BreakTest`;
 
   const sortedRequests = requests.filter(request => showCached || !isCacheOnly(request)).sort((left, right) => (
@@ -317,6 +397,7 @@ function showUnavailable(message) {
   title.textContent = "Transaction unavailable";
   summary.textContent = "";
   cacheToggle.hidden = true;
+  saveButton.hidden = true;
   clearHover();
   timeline.replaceChildren();
   requestRows.replaceChildren();

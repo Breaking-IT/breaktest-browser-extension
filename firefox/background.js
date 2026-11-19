@@ -784,6 +784,10 @@ function finalizeRequest(owner, state, finishedAt) {
 }
 
 function applyResponse(state, details) {
+  // Retain an explicit 304 if a later event describes the cached response.
+  if (state.response.status === 304 && details.fromCache && details.statusCode === 200) {
+    return;
+  }
   const headers = details.responseHeaders
     ? headersToHar(details.responseHeaders)
     : state.response.headers;
@@ -821,6 +825,13 @@ function buildHar(owner) {
   const entries = [...owner.entries].sort((left, right) => {
     const timeDifference = Date.parse(left.startedDateTime) - Date.parse(right.startedDateTime);
     return timeDifference || left._breaktest.entryOrdinal - right._breaktest.entryOrdinal;
+  }).map(entry => {
+    const {response} = entry;
+    if (response.status !== 304) return entry;
+    // A 304 has no HTTP body, including when recovered data includes cached bytes.
+    return {...entry, response: {
+      ...response, bodySize: 0, content: {size: 0, mimeType: response.content.mimeType}
+    }};
   });
   return {
     log: {

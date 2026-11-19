@@ -529,7 +529,82 @@ async function testFrameLifecycle() {
   } finally { context.chrome.debugger.sendCommand = original; }
 }
 
+async function testVanishedWebSocketContext() {
+  resetRecording();
+  const sendCommand = context.chrome.debugger.sendCommand;
+  const sendMessage = context.chrome.runtime.sendMessage;
+  const warnings = [];
+  context.chrome.runtime.sendMessage = async message => {
+    if (message.type === "recorder-warning") warnings.push(message.message);
+  };
+  context.chrome.debugger.sendCommand = async (_source, method, params) => {
+    if (method === "Runtime.evaluate" && params?.contextId === 1) {
+      throw new Error('{"code":-32000,"message":"Cannot find context with specified id"}');
+    }
+    if (method === "Runtime.evaluate" && params?.contextId === 2) {
+      throw vm.runInContext('new Error("Unexpected evaluation failure")', context);
+    }
+    return {};
+  };
+  try {
+    await vm.runInContext('enableWebSocketLifecycle(recording, {tabId: 1})', context);
+    const onEvent = context.chrome.debugger.onEvent.listeners[0];
+    for (const id of [1, 2, 3]) {
+      onEvent({tabId: 1}, "Runtime.executionContextCreated", {context: {id}});
+    }
+    await vm.runInContext('settlePendingTasks(recording)', context);
+    assert.deepStrictEqual(warnings, ["Unexpected evaluation failure"]);
+    assert.strictEqual(vm.runInContext('recording.webSocketLifecycle.targets.get("root").contexts.has(1)', context), false);
+    assert.strictEqual(vm.runInContext('recording.webSocketLifecycle.targets.get("root").contexts.has(3)', context), true);
+    assert.strictEqual(vm.runInContext('recorderStatus().attached', context), true);
+  } finally {
+    context.chrome.debugger.sendCommand = sendCommand;
+    context.chrome.runtime.sendMessage = sendMessage;
+  }
+}
+
+async function testCachedBodyExcludedFrom304Har() {
+  const sendCommand = context.chrome.debugger.sendCommand;
+  try {
+    for (const streaming of [true, false]) {
+      resetRecording();
+      const body = btoa("cached bytes");
+      context.chrome.debugger.sendCommand = async (_source, method) => {
+        if (method === "Network.streamResourceContent" && streaming) return {bufferedData: body};
+        if (method === "Network.getResponseBody") return {body, base64Encoded: true};
+        return {};
+      };
+      const responses = await vm.runInContext(`(async () => {
+        const source = {tabId: 1};
+        for (const requestId of ["fresh", "revalidated"]) {
+          await requestWillBeSent(source, {requestId, timestamp: 1, wallTime: 1700000000, type: "Fetch",
+            request: {method: "GET", url: "https://example.test/" + requestId, headers: {}}});
+          await responseReceived(source, {requestId, hasExtraInfo: requestId === "revalidated", timestamp: 2,
+            type: "Fetch", response: {status: 200, mimeType: "application/octet-stream", headers: {}}});
+          responseDataReceived(source, {requestId, timestamp: 2.5, dataLength: 12});
+          await loadingFinished(source, {requestId, timestamp: 3, encodedDataLength: 60});
+        }
+        // The wire status may reach the recorder after the cached body.
+        responseExtraInfo(source, {requestId: "revalidated", statusCode: 304, headers: {etag: "cached"}});
+        return JSON.stringify(buildHar(recording).log.entries.map(entry => entry.response));
+      })()`, context);
+      const [fresh, revalidated] = JSON.parse(responses);
+      assert.strictEqual(fresh.status, 200);
+      assert.strictEqual(fresh.content.text, body);
+      assert.strictEqual(fresh.content.encoding, "base64");
+      assert.strictEqual(revalidated.status, 304);
+      assert.strictEqual(revalidated.bodySize, 0);
+      assert.deepStrictEqual(revalidated.content, {size: 0, mimeType: "application/octet-stream"});
+      assert.deepStrictEqual(revalidated.headers, [{name: "etag", value: "cached"}]);
+    }
+  } finally {
+    context.chrome.debugger.sendCommand = sendCommand;
+  }
+}
+
 async function main() {
+  await testCachedBodyExcludedFrom304Har();
+  await testVanishedWebSocketContext();
   await testFrameLifecycle();
   await testDocumentTargetHandoff();
   await testNetworkPendingBeforeBodyCapture();

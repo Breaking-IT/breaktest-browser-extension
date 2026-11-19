@@ -1421,6 +1421,13 @@ function buildHar(session) {
   const entries = [...session.entries].sort((left, right) => {
     const timeDifference = Date.parse(left.startedDateTime) - Date.parse(right.startedDateTime);
     return timeDifference || left._breaktest.entryOrdinal - right._breaktest.entryOrdinal;
+  }).map(entry => {
+    const {response} = entry;
+    if (response.status !== 304) return entry;
+    // CDP can supply the cached representation alongside a network 304.
+    return {...entry, response: {
+      ...response, bodySize: 0, content: {size: 0, mimeType: response.content.mimeType}
+    }};
   });
   return {
     log: {

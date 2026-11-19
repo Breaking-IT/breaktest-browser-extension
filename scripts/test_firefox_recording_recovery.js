@@ -125,6 +125,48 @@ async function request(bg, id, finish = true, body = "response " + id) {
   assert.equal(largeStorage.saved.entries[0]._breaktest.bodyTruncated, false);
   await large.send({type: 'stop-recording'});
   assert.equal(largeStorage.har.log.entries[0].response.content.text, largeBody);
+  const cacheStorage = {};
+  const cache = background(cacheStorage);
+  await cache.send({type: 'start-recording', tabId: 1, transactionName: 'Cache revalidation'});
+  for (const [id, statusCode] of [['wire-304', 304], ['cached-200', 200]]) {
+    const details = {tabId: 1, requestId: id, url: 'https://example.test/' + id,
+      method: 'GET', type: 'xmlhttprequest', timeStamp: 1000};
+    await cache.api.webRequest.onBeforeRequest.listeners[0](details);
+    await cache.api.webRequest.onHeadersReceived.listeners[0]({...details, timeStamp: 1010, statusCode,
+      statusLine: statusCode === 304 ? 'HTTP/1.1 304 Not Modified' : 'HTTP/1.1 200 OK',
+      responseHeaders: [{name: 'etag', value: '"cached"'}]});
+    const cached = {...details, statusCode: 200, statusLine: 'HTTP/1.1 200 OK', fromCache: true};
+    if (statusCode === 304) {
+      await cache.api.webRequest.onHeadersReceived.listeners[0]({...cached, timeStamp: 1013,
+        responseHeaders: [{name: 'content-type', value: 'text/plain'}]});
+    }
+    await cache.api.webRequest.onResponseStarted.listeners[0]({...cached, timeStamp: 1015});
+    cache.filters.get(id).ondata({data: new TextEncoder().encode('cached body').buffer});
+    cache.filters.get(id).onstop();
+    await cache.api.webRequest.onCompleted.listeners[0]({...cached, timeStamp: 1020});
+  }
+  await cache.send({type: 'stop-recording'});
+  const [wire304, cached200] = cacheStorage.har.log.entries.map(entry => entry.response);
+  assert.equal(wire304.status, 304);
+  assert.equal(wire304.statusText, 'Not Modified');
+  assert.deepEqual(wire304.headers, [{name: 'etag', value: '"cached"'}]);
+  assert.equal(wire304.bodySize, 0);
+  assert.equal(wire304.content.text, undefined);
+  assert.equal(cached200.status, 200);
+  assert.equal(cached200.bodySize, 11);
+  assert.equal(cached200.content.text, btoa('cached body'));
+  const revalidatedStorage = {};
+  let revalidated = background(revalidatedStorage);
+  await revalidated.send({type: 'start-recording', tabId: 1, transactionName: 'Cache revalidation'});
+  await request(revalidated, 'revalidated');
+  // Simulate a checkpoint containing body bytes alongside a 304 status.
+  revalidatedStorage.saved.entries[0].response.status = 304;
+  revalidated = background(revalidatedStorage);
+  await revalidated.send({type: 'stop-recording'});
+  const {response} = revalidatedStorage.har.log.entries[0];
+  assert.equal(response.status, 304);
+  assert.equal(response.bodySize, 0);
+  assert.deepEqual(response.content, {size: 0, mimeType: 'text/plain'});
   const pending = background({});
   await pending.send({type: 'start-recording', tabId: 1, transactionName: 'Pending lifecycle'});
   await request(pending, 'body-draining', false);

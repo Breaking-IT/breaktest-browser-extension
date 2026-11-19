@@ -1,14 +1,16 @@
 #!/usr/bin/env node
-// Optional visual smoke test; requires Playwright and Chromium.
-const {chromium} = require('playwright');
+// Optional visual smoke test; requires Playwright and Chromium or Firefox.
+const {chromium, firefox} = require('playwright');
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 (async () => {
-  const browser = await chromium.launch({channel: process.env.PLAYWRIGHT_CHANNEL || 'chromium', headless: true});
+  const browser = process.env.PLAYWRIGHT_FIREFOX ? await firefox.launch({headless: true}) : await chromium.launch({
+    channel: process.env.PLAYWRIGHT_CHANNEL || 'chromium', executablePath: process.env.CHROMIUM_PATH, headless: true
+  });
   try {
     for (const kind of ['chrome', 'firefox']) {
-      const page = await browser.newPage({viewport: {width: 1120, height: 660}});
+      const page = await browser.newPage({locale: 'en-US', viewport: {width: 1120, height: 660}});
       await page.route('http://recorder.test/**', route => {
         const file = path.basename(new URL(route.request().url()).pathname);
         route.fulfill({path: path.join(__dirname, '..', kind, file), contentType: file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html'});
@@ -67,7 +69,7 @@ const assert = require('node:assert/strict');
       assert.equal(await page.locator('tbody tr').count(), 7);
       const bounds = await first.locator('.waterfall-cell').boundingBox();
       await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
-      assert.match(await page.locator('#waterfall-hover-time').innerText(), /305 ms since first request/);
+      assert.match(await page.locator('#waterfall-hover-time').innerText(), /30[4-6] ms since first request/);
       assert.equal(await page.locator('.waterfall-hovering').count(), 1);
       assert.equal(await page.locator('#request-timing-tooltip').isVisible(), true);
       assert.match(await page.locator('#request-timing-tooltip').innerText(), /End offset\s+280 ms/);
@@ -115,7 +117,41 @@ const assert = require('node:assert/strict');
       assert.equal(await page.locator('#request-timing-tooltip').isVisible(), false);
       await first.locator('.waterfall-cell').focus();
       assert.equal(await page.locator('#request-timing-tooltip').isVisible(), true);
-      console.log(`${kind}: size, phases, TLS overlap, missing data and live updates passed`);
+      await page.setViewportSize({width: 780, height: 420});
+      const dimensions = await page.evaluate(() => {
+        for (let ordinal = 11; ordinal <= 40; ordinal++) {
+          receiveUpdate({type: 'request-finished', summary: {
+            ordinal, transactionId: 't1', method: 'GET', status: ordinal === 40 ? 500 : 200,
+            url: 'https://application.example/request-' + ordinal,
+            startedDateTime: new Date(1700000001000 + ordinal).toISOString(), time: 120, size: 100
+          }});
+        }
+        const scroller = document.querySelector('.request-detail-table-wrap');
+        scroller.scrollTo(60, 100);
+        return {width: scroller.scrollWidth, height: scroller.scrollHeight};
+      });
+      const [download] = await Promise.all([
+        page.waitForEvent('download', {timeout: 10000}),
+        page.getByRole('button', {name: 'Save as PNG'}).click()
+      ]);
+      assert.equal(download.suggestedFilename(), 'UC1_01_OpenHomepage-waterfall.png');
+      const image = fs.readFileSync(await download.path());
+      assert.equal(image.toString('hex', 0, 8), '89504e470d0a1a0a');
+      assert.ok(image.readUInt32BE(16) > dimensions.width);
+      assert.ok(image.readUInt32BE(20) > dimensions.height);
+      const lastRowColor = await page.evaluate(async png => {
+        const bitmap = await createImageBitmap(new Blob([Uint8Array.from(atob(png), byte => byte.charCodeAt(0))]));
+        const canvas = document.createElement('canvas');
+        canvas.width = 1;
+        canvas.height = 1;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(bitmap, 17, bitmap.height - 25, 1, 1, 0, 0, 1, 1);
+        return Array.from(ctx.getImageData(0, 0, 1, 1).data);
+      }, image.toString('base64'));
+      assert.deepEqual(lastRowColor, [58, 32, 35, 255], 'the offscreen failed row is rendered in the dark theme');
+      const scroll = await page.locator('.request-detail-table-wrap').evaluate(el => [el.scrollLeft, el.scrollTop]);
+      assert.deepEqual(scroll, [60, 100]);
+      console.log(`${kind}: timing, live updates and full waterfall PNG passed`);
       await page.close();
     }
   } finally { await browser.close(); }

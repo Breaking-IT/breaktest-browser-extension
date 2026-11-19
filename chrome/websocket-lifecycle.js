@@ -85,10 +85,17 @@ async function webSocketExecutionContext(owner, source, context) {
   const info = capture.targets.get(source.sessionId || 'root');
   if (!info) return;
   info.contexts.add(context.id);
-  await chrome.debugger.sendCommand(source, 'Runtime.evaluate', {
-    contextId: context.id,
-    expression: `(${installWebSocketLifecycle.toString()})(${JSON.stringify(capture.binding)})`
-  });
+  try {
+    await chrome.debugger.sendCommand(source, 'Runtime.evaluate', {
+      contextId: context.id,
+      expression: `(${installWebSocketLifecycle.toString()})(${JSON.stringify(capture.binding)})`
+    });
+  } catch (error) {
+    // Navigation or frame removal can destroy a context before evaluation.
+    const missingContext = /(?:^|"message"\s*:\s*")Cannot find context with specified id(?:$|")/;
+    if (!missingContext.test(error?.message ?? String(error))) throw error;
+    info.contexts.delete(context.id);
+  }
 }
 
 function registerWebSocketLifecycle(owner, state) {
